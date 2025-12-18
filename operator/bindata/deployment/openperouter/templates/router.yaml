@@ -175,6 +175,8 @@ spec:
           {{- toYaml . | nindent 12 }}
         {{- end }}
       - name: reloader
+        securityContext:
+          privileged: true
         image: {{ .Values.openperouter.image.repository }}:{{ .Values.openperouter.image.tag | default .Chart.AppVersion }}
         {{- if .Values.openperouter.image.pullPolicy }}
         imagePullPolicy: {{ .Values.openperouter.image.pullPolicy }}
