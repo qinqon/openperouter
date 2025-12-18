@@ -48,17 +48,30 @@ func checkVXLanConfigured(vxLan *netlink.Vxlan, bridgeIndex, loopbackIndex int, 
 	if vxLan.Port != params.VXLanPort {
 		return fmt.Errorf("port is not one coming from params: %d, %d", vxLan.Port, params.VXLanPort)
 	}
-
 	if vxLan.Learning {
 		return fmt.Errorf("learning is enabled")
 	}
 
-	vtepIP, _, err := net.ParseCIDR(params.VTEPIP)
-	if err != nil {
-		return fmt.Errorf("failed to parse vtep ip %v: %w", params.VTEPIP, err)
-	}
-	if !vxLan.SrcAddr.Equal(vtepIP) {
-		return fmt.Errorf("src addr is not one coming from params: %v, %v", vxLan.SrcAddr, params.VTEPIP)
+	if params.VTEPIP != "" {
+		vtepIP, _, err := net.ParseCIDR(params.VTEPIP)
+		if err != nil {
+			return fmt.Errorf("failed to parse vtep ip %v: %w", params.VTEPIP, err)
+		}
+		if !vxLan.SrcAddr.Equal(vtepIP) {
+			return fmt.Errorf("src addr is not one coming from params: %v, %v", vxLan.SrcAddr, params.VTEPIP)
+		}
+	} else if params.VTEPInterface != "" {
+		iface, err := net.InterfaceByName(params.VTEPInterface)
+		if err != nil {
+			return fmt.Errorf("failed to get vtep interface %s: %w", params.VTEPInterface, err)
+		}
+		expectedIP, err := findFirstInterfaceIPv4Address(iface)
+		if err != nil {
+			return fmt.Errorf("failed to get vtep source address from interface %s: %w", params.VTEPInterface, err)
+		}
+		if !vxLan.SrcAddr.Equal(expectedIP) {
+			return fmt.Errorf("src addr does not match vtep interface ip: %v, expected %v", vxLan.SrcAddr, expectedIP)
+		}
 	}
 
 	if vxLan.VtepDevIndex != loopbackIndex {
@@ -68,27 +81,46 @@ func checkVXLanConfigured(vxLan *netlink.Vxlan, bridgeIndex, loopbackIndex int, 
 }
 
 func createVXLan(params VNIParams, bridge *netlink.Bridge) (*netlink.Vxlan, error) {
-	loopback, err := netlink.LinkByName(UnderlayLoopback)
+	vtepInterfaceName := UnderlayLoopback
+	if params.VTEPInterface != "" {
+		vtepInterfaceName = params.VTEPInterface
+	}
+	vtepInterface, err := net.InterfaceByName(vtepInterfaceName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get loopback by name: %w", err)
+		return nil, fmt.Errorf("failed looking for vtep interface %s: %w", vtepInterfaceName, err)
 	}
 
 	vxlanName := vxLanNameFromVNI(params.VNI)
 
-	vtepIP, _, err := net.ParseCIDR(params.VTEPIP)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse vtep ip %v: %w", params.VTEPIP, err)
+	// Resolve the source IP for the VXLAN interface.
+	// When VTEPIP is explicitly provided (vtepCIDR mode), use it directly.
+	// When using VTEPInterface, resolve the IP from the interface itself
+	// so the kernel sets the VXLAN local attribute, which FRR needs to
+	// determine the local VTEP IP for Type-3 IMET routes.
+	var srcAddr net.IP
+	if params.VTEPIP != "" {
+		vtepIP, _, err := net.ParseCIDR(params.VTEPIP)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse vtep ip %v: %w", params.VTEPIP, err)
+		}
+		srcAddr = vtepIP
+	} else if params.VTEPInterface != "" {
+		srcAddr, err = findFirstInterfaceIPv4Address(vtepInterface)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get vtep source address from interface %s: %w", vtepInterfaceName, err)
+		}
 	}
 
-	toCreate := &netlink.Vxlan{LinkAttrs: netlink.LinkAttrs{
-		Name:        vxlanName,
-		MasterIndex: bridge.Index,
-	},
+	toCreate := &netlink.Vxlan{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:        vxlanName,
+			MasterIndex: bridge.Index,
+		},
 		VxlanId:      params.VNI,
 		Port:         params.VXLanPort,
 		Learning:     false,
-		SrcAddr:      vtepIP,
-		VtepDevIndex: loopback.Attrs().Index,
+		VtepDevIndex: vtepInterface.Index,
+		SrcAddr:      srcAddr,
 	}
 
 	link, err := netlink.LinkByName(vxlanName)
@@ -102,7 +134,7 @@ func createVXLan(params VNIParams, bridge *netlink.Bridge) (*netlink.Vxlan, erro
 		return nil, fmt.Errorf("failed to get vxlan link by name %s: %w", vxlanName, err)
 	}
 	vxlan, ok := link.(*netlink.Vxlan)
-	if ok && checkVXLanConfigured(vxlan, bridge.Index, loopback.Attrs().Index, params) == nil {
+	if ok && checkVXLanConfigured(vxlan, bridge.Index, vtepInterface.Index, params) == nil {
 		return vxlan, nil
 	}
 	if err := netlink.LinkDel(link); err != nil {
@@ -131,4 +163,30 @@ func vniFromVXLanName(name string) (int, error) {
 		return 0, fmt.Errorf("failed to get vni for vxlan %s", name)
 	}
 	return res, nil
+}
+
+// findFirstInterfaceIPv4Address returns the first IPv4 address assigned to the interface,
+// skipping the special underlay marker address.
+func findFirstInterfaceIPv4Address(iface *net.Interface) (net.IP, error) {
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get addresses: %w", err)
+	}
+	for _, addr := range addrs {
+		if addr.String() == underlayInterfaceSpecialAddr {
+			continue
+		}
+		var ip net.IP
+		switch v := addr.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		return ip, nil
+	}
+	return nil, fmt.Errorf("no IPv4 address found on interface %s", iface.Name)
 }

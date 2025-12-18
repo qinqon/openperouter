@@ -28,7 +28,8 @@ type UnderlayParams struct {
 }
 
 type UnderlayEVPNParams struct {
-	VtepIP string `json:"vtep_ip"`
+	VtepIP        string `json:"vtep_ip"`
+	VtepInterface string `json:"vtep_interface"`
 }
 
 func SetupUnderlay(ctx context.Context, params UnderlayParams) error {
@@ -53,8 +54,11 @@ func SetupUnderlay(ctx context.Context, params UnderlayParams) error {
 	if params.EVPN == nil {
 		return nil
 	}
-	if err := createLoopback(ctx, ns, params.EVPN.VtepIP); err != nil {
-		return err
+
+	if params.EVPN.VtepInterface == "" {
+		if err := ensureLoopback(ctx, ns, params.EVPN.VtepIP); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -66,7 +70,7 @@ func (e UnderlayExistsError) Error() string {
 	return string(e)
 }
 
-func createLoopback(ctx context.Context, ns netns.NsHandle, vtepIP string) error {
+func ensureLoopback(ctx context.Context, ns netns.NsHandle, vtepIP string) error {
 	slog.DebugContext(ctx, "setup underlay", "step", "creating loopback interface")
 	defer slog.DebugContext(ctx, "setup underlay", "step", "loopback interface created")
 
@@ -84,7 +88,6 @@ func createLoopback(ctx context.Context, ns netns.NsHandle, vtepIP string) error
 		if err != nil {
 			return err
 		}
-
 		return nil
 	}); err != nil {
 		return err
