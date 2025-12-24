@@ -5,6 +5,7 @@
 *.so
 *.dylib
 bin/*
+kubeconfig
 Dockerfile.cross
 
 # Test binary, built with `go test -c`
@@ -25,3 +26,16 @@ go.work
 *.swp
 *.swo
 *~
+
+# Clab generated stuff
+clab/hybrid/clab-kind/
+
+# Credentials and secrets
+.env
+.env.local
+*.key
+*.pem
+*credentials*.json
+*secret*.yaml
+*secret*.yml
+*.bak

@@ -1,0 +1,61 @@
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: 192-170-1-4
+  namespace: default
+spec:
+  runStrategy: WaitAsReceiver
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: 192-170-1-4
+        app: evpn-vm
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - evpn-vm
+            topologyKey: kubernetes.io/hostname
+      domain:
+        cpu:
+          model: Broadwell-noTSX
+        devices:
+          interfaces:
+          - bridge: {}
+            name: evpn
+          disks:
+          - disk:
+              bus: virtio
+            name: containerdisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+        resources:
+          requests:
+            memory: 2048M
+        machine:
+          type: ""
+      networks:
+      - multus:
+          networkName: default/evpn
+        name: evpn
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - containerDisk:
+          image: quay.io/kubevirt/fedora-with-test-tooling-container-disk:v1.6.2
+        name: containerdisk
+      - cloudInitNoCloud:
+          networkData: |
+            version: 2
+            ethernets:
+              eth0:
+                addresses:
+                - 192.170.1.5/24
+                gateway4: 192.170.1.1
+        name: cloudinitdisk

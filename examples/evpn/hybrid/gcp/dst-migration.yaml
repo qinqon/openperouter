@@ -1,0 +1,11 @@
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachineInstanceMigration
+metadata:
+  name: vmim-target
+  namespace: default
+spec:
+  receive:
+    migrationID: "cross-cluster-demo"
+  vmiName: 192-170-1-4
+
