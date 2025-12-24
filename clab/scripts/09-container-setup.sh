@@ -18,16 +18,23 @@ fi
 setup_containers() {
     echo "Executing setup scripts in containers for clusters: ${CLUSTER_NAMES[*]}"
 
-    # Setup common leaf containers (always present)
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-leafA /setup.sh
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-leafB /setup.sh
+    # Setup common leaf containers (if present)
+    if ${CONTAINER_ENGINE_CLI} exec clab-kind-leafA test -f /setup.sh 2>/dev/null; then
+        echo "Setting up leafA container"
+        ${CONTAINER_ENGINE_CLI} exec clab-kind-leafA /setup.sh
+    fi
+    if ${CONTAINER_ENGINE_CLI} exec clab-kind-leafB test -f /setup.sh 2>/dev/null; then
+        echo "Setting up leafB container"
+        ${CONTAINER_ENGINE_CLI} exec clab-kind-leafB /setup.sh
+    fi
 
-    # Setup host containers (always present)
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-hostA_red /setup.sh
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-hostA_blue /setup.sh
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-hostA_default /setup.sh
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-hostB_red /setup.sh
-    ${CONTAINER_ENGINE_CLI} exec clab-kind-hostB_blue /setup.sh
+    # Setup host containers (if present)
+    for host_container in hostA_red hostA_blue hostA_default hostB_red hostB_blue; do
+        if ${CONTAINER_ENGINE_CLI} exec clab-kind-${host_container} test -f /setup.sh 2>/dev/null; then
+            echo "Setting up ${host_container} container"
+            ${CONTAINER_ENGINE_CLI} exec clab-kind-${host_container} /setup.sh
+        fi
+    done
 
     # Setup cluster-specific leaf containers
     for cluster_name in "${CLUSTER_NAMES[@]}"; do

@@ -1,0 +1,14 @@
+apiVersion: openpe.openperouter.github.io/v1alpha1
+kind: Underlay
+metadata:
+  name: underlay
+  namespace: openperouter-system
+spec:
+  asn: 64514
+  evpn:
+    vtepcidr:  100.65.0.0/24
+  nics:
+    - toswitch
+  neighbors:
+    - asn: 64512
+      address: 10.250.11.1

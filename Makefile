@@ -242,6 +242,52 @@ deploy-helm: helm kind deploy-cluster
 	sleep 2s # wait for daemonset to be created
 	$(KUBECTL) -n ${NAMESPACE} wait --for=condition=Ready --all pods --timeout 300s
 
+.PHONY: build-frr-vpn-image
+build-frr-vpn-image: ## Build FRR+VPN Docker image for hybrid topology
+	@echo "Building FRR+VPN image..."
+	$(CONTAINER_ENGINE) build -f clab/dockerfile/Dockerfile.frr-vpn -t frr-vpn:latest clab/dockerfile/
+	@echo "FRR+VPN image built successfully"
+
+.PHONY: deploy-hybrid
+deploy-hybrid: export CLAB_TOPOLOGY_FILE=hybrid/kind.clab.yml
+deploy-hybrid: export IP_MAP_FILE=hybrid/ip_map.txt
+deploy-hybrid: build-frr-vpn-image kind deploy-cluster deploy-controller
+	@echo '=== Hybrid topology deployed ==='
+	@echo 'To use the cluster:'
+	@echo 'export KUBECONFIG=$(KUBECONFIG_PATH)'
+	@echo ''
+	@echo 'Verify VPN: docker exec clab-kind-leafgcp swanctl --list-sas'
+	@echo 'Check BGP: docker exec clab-kind-spine vtysh -c "show bgp summary"'
+
+.PHONY: undeploy-hybrid
+undeploy-hybrid: ## Undeploy hybrid topology and clean up all resources
+	@echo '=== Cleaning up hybrid topology ==='
+	@echo '[1/6] Deleting kind cluster...'
+	@$(KIND) delete cluster --name $(KIND_CLUSTER_NAME) 2>/dev/null || echo '  No kind cluster found'
+	@echo '[2/6] Removing containerlab containers...'
+	@$(CONTAINER_ENGINE) rm -f clab-kind-spine clab-kind-leafkind clab-kind-leafgcp 2>/dev/null || echo '  No containerlab containers found'
+	@echo '[3/6] Removing bridge networks...'
+	@$(CONTAINER_ENGINE) network rm clab-kind-leafkind-switch 2>/dev/null || echo '  No kind-specific bridge found'
+	@$(CONTAINER_ENGINE) network rm clab 2>/dev/null || echo '  No clab management network found'
+	@echo '[4/6] Cleaning up veth interfaces...'
+	@sudo ip link show | grep -oE '[a-z0-9_]+@' | sed 's/@$$//' | while read iface; do \
+		sudo ip link delete $$iface 2>/dev/null && echo "  Removed $$iface" || true; \
+	done || true
+	@echo '[5/6] Removing containerlab and Docker bridge interfaces...'
+	@for br in $$(ip link show | grep -oE '(leafkind-switch|clab-kind-[a-z0-9-]+|br-[a-f0-9]{12})' | sort -u); do \
+		if [[ "$$br" == br-* ]]; then \
+			if ! docker network ls --format '{{.ID}}' | grep -q "$${br#br-}"; then \
+				sudo ip link delete $$br 2>/dev/null && echo "  Removed orphaned bridge $$br" || true; \
+			fi; \
+		else \
+			sudo ip link delete $$br 2>/dev/null && echo "  Removed bridge $$br" || true; \
+		fi; \
+	done || true
+	@echo '[6/6] Cleaning up generated files...'
+	@rm -rf clab/hybrid/clab-kind 2>/dev/null || echo '  No clab-kind directory found'
+	@echo ''
+	@echo '=== Hybrid topology cleanup complete ==='
+
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
