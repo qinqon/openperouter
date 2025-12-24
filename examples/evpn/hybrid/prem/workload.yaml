@@ -1,0 +1,139 @@
+---
+apiVersion: "k8s.cni.cncf.io/v1"
+kind: NetworkAttachmentDefinition
+metadata:
+  name: evpn
+  namespace: default
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "evpn",
+      "type": "bridge",
+      "bridge": "br-hs-110",
+      "macspoofchk": false,
+      "disableContainerInterface": true,
+      "mtu": 1350
+    }
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: 192-170-1-4
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: 192-170-1-4
+        app: evpn-vm
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - evpn-vm
+            topologyKey: kubernetes.io/hostname
+      domain:
+        cpu:
+          model: Broadwell-noTSX
+        devices:
+          interfaces:
+          - bridge: {}
+            name: evpn
+          disks:
+          - disk:
+              bus: virtio
+            name: containerdisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+        resources:
+          requests:
+            memory: 2048M
+        machine:
+          type: ""
+      networks:
+      - multus:
+          networkName: default/evpn
+        name: evpn
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - containerDisk:
+          image: quay.io/kubevirt/fedora-with-test-tooling-container-disk:v1.6.2
+        name: containerdisk
+      - cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            runcmd:
+              - iperf3 -s -D
+          networkData: |
+            version: 2
+            ethernets:
+              eth0:
+                addresses:
+                - 192.170.1.4/24
+                gateway4: 192.170.1.1
+        name: cloudinitdisk
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: 192-170-1-5
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: 192-170-1-5
+    spec:
+      domain:
+        cpu:
+          model: Broadwell-noTSX
+        devices:
+          interfaces:
+          - masquerade: {}
+            name: pod
+          - bridge: {}
+            name: evpn
+          disks:
+          - disk:
+              bus: virtio
+            name: containerdisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+        resources:
+          requests:
+            memory: 2048M
+        machine:
+          type: ""
+      networks:
+      - name: pod
+        pod: {}
+      - multus:
+          networkName: default/evpn
+        name: evpn
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - containerDisk:
+          image: quay.io/kubevirt/fedora-with-test-tooling-container-disk:v1.6.2
+        name: containerdisk
+      - cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            runcmd:
+              - iperf3 -c 192.170.1.4 -t 0 -b 500m
+          networkData: |
+            version: 2
+            ethernets:
+              eth1:
+                addresses:
+                - 192.170.1.5/24
+        name: cloudinitdisk

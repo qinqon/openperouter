@@ -65,16 +65,19 @@ func main() {
 		ipCmdArgs = append(ipCmdArgs, "addr", "add", ipAddress, "dev", interfaceName)
 		cmdAdd := exec.Command(engineCmd, ipCmdArgs...)
 		fmt.Printf("Running command: %s\n", strings.Join(cmdAdd.Args, " "))
-		if err := cmdAdd.Run(); err != nil {
-			fmt.Printf("Error assigning IP: %v \n", err)
+		output, err := cmdAdd.CombinedOutput()
+		if err != nil {
+			fmt.Printf("Error assigning IP: %v: %s \n", err, string(output))
 			continue
 		}
 
 		// #nosec G204
 		upArgs := append(append([]string{}, engineArgs...), "exec", containerName, "ip", "link", "set", interfaceName, "up")
 		cmdUp := exec.Command(engineCmd, upArgs...)
-		if err := cmdUp.Run(); err != nil {
-			fmt.Printf("Error bringing interface up: %v\n", err)
+		fmt.Printf("Running command: %s\n", strings.Join(cmdUp.Args, " "))
+		output, err = cmdUp.CombinedOutput()
+		if err != nil {
+			fmt.Printf("Error bringing interface up: %v: %s\n", err, string(output))
 			continue
 		}
 	}

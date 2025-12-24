@@ -1,0 +1,7 @@
+pe-kind-control-plane,toswitch,10.250.11.3/24
+pe-kind-worker,toswitch,10.250.11.4/24
+clab-kind-spine,eth1,10.250.1.0/31
+clab-kind-spine,eth2,10.250.1.2/31
+clab-kind-leafkind,eth1,10.250.1.1/31
+clab-kind-leafkind,toswitch,10.250.11.1/24
+clab-kind-leafgcp,eth1,10.250.1.3/31

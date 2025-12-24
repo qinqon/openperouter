@@ -5,6 +5,7 @@
 *.so
 *.dylib
 bin/*
+kubeconfig
 Dockerfile.cross
 
 # Generated leaf config binaries
@@ -36,3 +37,16 @@ go.work
 logs_*/
 
 cmd/hostbridge/hostbridge
+
+# Clab generated stuff
+clab/hybrid/clab-kind/
+
+# Credentials and secrets
+.env
+.env.local
+*.key
+*.pem
+*credentials*.json
+*secret*.yaml
+*secret*.yml
+*.bak
