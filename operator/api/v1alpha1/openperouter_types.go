@@ -32,6 +32,20 @@ const (
 	LogLevelNone  LogLevel = "none"
 )
 
+// RouteReflectorConfig configures the internal iBGP route reflector deployment.
+type RouteReflectorConfig struct {
+	// Enabled deploys the RR controller Deployment which configures two router pods
+	// as iBGP route reflectors for EVPN East/West distribution.
+	// +optional
+	// +kubebuilder:default:=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Replicas is the number of RR controller replicas (= number of RR nodes).
+	// +optional
+	// +kubebuilder:default:=2
+	// +kubebuilder:validation:Minimum=1
+	Replicas int `json:"replicas,omitempty"`
+}
+
 // OpenPERouterSpec defines the desired state of OpenPERouter
 type OpenPERouterSpec struct {
 	// Define the verbosity of the controller and the router logging.
@@ -58,6 +72,11 @@ type OpenPERouterSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	HealthProbePort int `json:"healthProbePort,omitempty"`
+	// RouteReflector configures the internal iBGP route reflector deployment.
+	// When enabled, deploys a 2-replica RR controller that configures two router pods
+	// as iBGP route reflectors for EVPN East/West distribution.
+	// +optional
+	RouteReflector *RouteReflectorConfig `json:"routeReflector,omitempty"`
 }
 
 // OpenPERouterStatus defines the observed state of OpenPERouter

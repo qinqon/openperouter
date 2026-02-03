@@ -67,6 +67,18 @@ func APItoFRR(config ApiConfigData, nodeIndex int, logLevel string) (frr.Config,
 		Neighbors: underlayNeighbors,
 	}
 
+	for _, ip := range config.RRNodeUnderlayIPs {
+		ipFamily, err := ipfamily.ForAddresses(ip)
+		if err != nil {
+			return frr.Config{}, fmt.Errorf("invalid RR node underlay IP %s: %w", ip, err)
+		}
+		underlayConfig.RRClients = append(underlayConfig.RRClients, frr.NeighborConfig{
+			ASN:      underlay.Spec.ASN,
+			Addr:     ip,
+			IPFamily: ipFamily,
+		})
+	}
+
 	var passthroughConfig *frr.PassthroughConfig
 	if len(config.L3Passthrough) > 0 {
 		passthrough, err := passthroughToFRR(config.L3Passthrough[0], nodeIndex)
@@ -365,6 +377,28 @@ func durationToUint64(value time.Duration) (uint64, error) {
 		return 0, fmt.Errorf("cannot convert negative value to uint64: %d", value)
 	}
 	return uint64(value), nil // #nosec G115
+}
+
+// RouterIDForNode returns the BGP router ID for the given node index, derived from routerIDCIDR.
+func RouterIDForNode(underlay v1alpha1.Underlay, nodeIndex int) (string, error) {
+	return routerIDFromUnderlay(underlay, nodeIndex)
+}
+
+// UnderlayIPForNode returns the underlay (VTEP) IP for the given node index.
+// Returns an empty string when EVPN is not configured or vtepInterface is used (not yet supported).
+func UnderlayIPForNode(underlay v1alpha1.Underlay, nodeIndex int) (string, error) {
+	if underlay.Spec.EVPN == nil {
+		return "", nil
+	}
+	if underlay.Spec.EVPN.VTEPCIDR != "" {
+		vtepIP, err := ipam.VTEPIp(underlay.Spec.EVPN.VTEPCIDR, nodeIndex)
+		if err != nil {
+			return "", fmt.Errorf("failed to get vtep ip, cidr %s, nodeIndex %d: %w", underlay.Spec.EVPN.VTEPCIDR, nodeIndex, err)
+		}
+		return vtepIP.IP.String(), nil
+	}
+	// vtepInterface case: IP must be read from the interface in the router namespace; not implemented here.
+	return "", nil
 }
 
 func routerIDFromUnderlay(underlay v1alpha1.Underlay, nodeIndex int) (string, error) {

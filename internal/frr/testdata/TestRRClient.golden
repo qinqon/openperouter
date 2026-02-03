@@ -3,11 +3,6 @@ log timestamp precision 3
 hostname hostname
 ip nht resolve-via-default
 ipv6 nht resolve-via-default
-bfd
-  profile foo
-    receive-interval 43
-    
-exit
 
 route-map allowall permit 1
 router bgp 64512
@@ -15,11 +10,10 @@ router bgp 64512
   no bgp network import-check
   no bgp default ipv4-unicast
   bgp router-id 10.0.0.1
-  neighbor 192.168.1.2 remote-as 64512
+  neighbor 192.168.1.2 remote-as 65000
   
   
   
-  neighbor 192.168.1.2 bfd profile foo
 
   address-family ipv4 unicast
     neighbor 192.168.1.2 activate
@@ -31,6 +25,19 @@ router bgp 64512
 
   address-family l2vpn evpn
     neighbor 192.168.1.2 activate
+    neighbor 192.168.1.2 allowas-in
     advertise-all-vni
     advertise-svi-ip
+  exit-address-family
+  neighbor 10.0.0.10 remote-as 64512
+  
+  
+  
+  neighbor 10.0.0.11 remote-as 64512
+  
+  
+  
+  address-family l2vpn evpn
+    neighbor 10.0.0.10 activate
+    neighbor 10.0.0.11 activate
   exit-address-family

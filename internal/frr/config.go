@@ -39,6 +39,8 @@ type UnderlayConfig struct {
 	RouterID  string
 	Neighbors []NeighborConfig
 	EVPN      *UnderlayEvpn
+	// RRClients holds iBGP neighbor configs pointing to RR nodes (used on client nodes only).
+	RRClients []NeighborConfig
 }
 
 type UnderlayEvpn struct {

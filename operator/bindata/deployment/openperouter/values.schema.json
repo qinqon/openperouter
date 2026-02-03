@@ -406,6 +406,39 @@
           "enabled": true,
           "validationFailurePolicy": "Fail"
         }
+      },
+      "routeReflector": {
+        "type": "object",
+        "description": "Configuration for the internal iBGP Route Reflector controller.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Deploys the RR controller Deployment which configures two router pods as iBGP route reflectors for EVPN East/West distribution.",
+            "default": false
+          },
+          "replicas": {
+            "type": "integer",
+            "description": "Number of RR controller replicas (= number of RR nodes). Each replica lands on a different node.",
+            "default": 2,
+            "minimum": 1
+          },
+          "healthProbePort": {
+            "type": "integer",
+            "description": "Port for the RR controller health and readiness probes.",
+            "default": 9082,
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "resources": {
+            "type": "object",
+            "description": "Resource requests and limits for the RR controller container."
+          }
+        },
+        "default": {
+          "enabled": false,
+          "replicas": 2,
+          "healthProbePort": 9082
+        }
       }
     }
   }

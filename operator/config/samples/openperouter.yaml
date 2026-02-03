@@ -5,3 +5,9 @@ metadata:
   namespace: openperouter-system
 spec:
   logLevel: debug
+  # Uncomment to enable the internal iBGP route reflector.
+  # Deploys a 2-replica RR controller that configures two router pods as RR nodes
+  # for EVPN East/West distribution via iBGP, without requiring EVPN support from the ToR.
+  # routeReflector:
+  #   enabled: true
+  #   replicas: 2

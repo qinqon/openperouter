@@ -440,6 +440,49 @@ func TestRawConfig(t *testing.T) {
 	testCheckConfigFile(t)
 }
 
+// TestRRClient verifies that RRClients are rendered as iBGP neighbors in the l2vpn evpn AF
+// without allowas-in, and that eBGP underlay neighbors do get allowas-in.
+func TestRRClient(t *testing.T) {
+	configFile := testSetup(t)
+	updater := testUpdater(configFile)
+
+	config := Config{
+		Underlay: UnderlayConfig{
+			MyASN:    64512,
+			RouterID: "10.0.0.1",
+			EVPN: &UnderlayEvpn{
+				VTEP: "100.64.0.1/32",
+			},
+			// eBGP neighbor (different ASN) → allowas-in expected
+			Neighbors: []NeighborConfig{
+				{
+					ASN:      65000,
+					Addr:     "192.168.1.2",
+					IPFamily: ipfamily.IPv4,
+				},
+			},
+			// iBGP RR node neighbors → no allowas-in
+			RRClients: []NeighborConfig{
+				{
+					ASN:      64512,
+					Addr:     "10.0.0.10",
+					IPFamily: ipfamily.IPv4,
+				},
+				{
+					ASN:      64512,
+					Addr:     "10.0.0.11",
+					IPFamily: ipfamily.IPv4,
+				},
+			},
+		},
+	}
+	if err := ApplyConfig(context.TODO(), &config, updater); err != nil {
+		t.Fatalf("Failed to apply config: %s", err)
+	}
+
+	testCheckConfigFile(t)
+}
+
 func testCompareFiles(t *testing.T, configFile, goldenFile string) {
 	var lastError error
 

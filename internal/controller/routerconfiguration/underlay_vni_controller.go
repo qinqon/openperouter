@@ -32,12 +32,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	"net"
+
 	"github.com/openperouter/openperouter/api/v1alpha1"
 	"github.com/openperouter/openperouter/internal/conversion"
 	"github.com/openperouter/openperouter/internal/filter"
 	"github.com/openperouter/openperouter/internal/frrconfig"
+	"github.com/openperouter/openperouter/internal/hostnetwork"
 	"github.com/openperouter/openperouter/internal/staticconfiguration"
 	v1 "k8s.io/api/core/v1"
+)
+
+const (
+	// LabelRR is the node label set by the RR controller to mark a node as route reflector.
+	LabelRR = "openperouter.io/rr"
+	// AnnotationUnderlayIP is the node annotation that stores the node's underlay (VTEP) IP.
+	AnnotationUnderlayIP = "openperouter.io/underlay-ip"
 )
 
 type PERouterReconciler struct {
@@ -60,7 +70,7 @@ type PERouterReconciler struct {
 
 type requestKey string
 
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=openpe.openperouter.github.io,resources=l3vnis,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=openpe.openperouter.github.io,resources=l3vnis/status,verbs=get;update;patch
@@ -121,6 +131,20 @@ func (r *PERouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		slog.Error("failed to get node index", "error", err)
 		return ctrl.Result{}, err
 	}
+
+	// Write the local node's underlay IP annotation so RR controller / client nodes can discover it.
+	if err := r.reconcileUnderlayIPAnnotation(ctx, config, targetNS); err != nil {
+		logger.Error("failed to write underlay-ip annotation", "error", err)
+		// Non-fatal: continue reconciliation.
+	}
+
+	// Discover RR nodes and populate RRNodeUnderlayIPs for the FRR conversion.
+	rrIPs, err := r.discoverRRNodeIPs(ctx)
+	if err != nil {
+		logger.Error("failed to discover RR nodes", "error", err)
+		// Non-fatal: proceed with empty RR list.
+	}
+	config.RRNodeUnderlayIPs = rrIPs
 
 	err = Reconcile(ctx, config, r.UnderlayFromMultus, nodeIndex, r.LogLevel, r.FRRConfigPath, targetNS, updater)
 	if nonRecoverableHostError(err) {
@@ -270,14 +294,23 @@ func (r *PERouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			switch o := e.ObjectNew.(type) {
 			case *v1.Node:
-				// Only reconcile if this is our node and labels changed
-				if o.Name != r.MyNode {
-					return false
-				}
 				old := e.ObjectOld.(*v1.Node)
-				oldLabels := labels.Set(old.Labels)
-				newLabels := labels.Set(o.Labels)
-				return !labels.Equals(oldLabels, newLabels)
+				if o.Name == r.MyNode {
+					// Always react to local node label changes.
+					oldLabels := labels.Set(old.Labels)
+					newLabels := labels.Set(o.Labels)
+					return !labels.Equals(oldLabels, newLabels)
+				}
+				// For other nodes: trigger only when the openperouter.io/rr label or
+				// openperouter.io/underlay-ip annotation changes.
+				oldRR := old.Labels[LabelRR]
+				newRR := o.Labels[LabelRR]
+				if oldRR != newRR {
+					return true
+				}
+				oldIP := old.Annotations[AnnotationUnderlayIP]
+				newIP := o.Annotations[AnnotationUnderlayIP]
+				return oldIP != newIP
 			case *v1.Pod: // handle only status updates
 				old := e.ObjectOld.(*v1.Pod)
 				if PodIsReady(old) != PodIsReady(o) {
@@ -311,6 +344,69 @@ func (r *PERouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return builder.Complete(r)
+}
+
+// reconcileUnderlayIPAnnotation writes the local node's underlay NIC IP (with mask, e.g.
+// "192.168.11.3/24") to the openperouter.io/underlay-ip annotation by reading the
+// moved underlay interface address from inside the router pod namespace.
+func (r *PERouterReconciler) reconcileUnderlayIPAnnotation(ctx context.Context, config conversion.ApiConfigData, targetNS string) error {
+	if len(config.Underlays) == 0 || len(config.Underlays[0].Spec.Nics) == 0 {
+		return nil
+	}
+	nicName := config.Underlays[0].Spec.Nics[0]
+	underlayIP, err := hostnetwork.UnderlayInterfaceIP(targetNS, nicName)
+	if err != nil {
+		return fmt.Errorf("failed to read underlay interface IP: %w", err)
+	}
+	if underlayIP == "" {
+		return nil
+	}
+
+	node := &v1.Node{}
+	if err := r.Get(ctx, client.ObjectKey{Name: r.MyNode}, node); err != nil {
+		return fmt.Errorf("failed to get node %s: %w", r.MyNode, err)
+	}
+	if node.Annotations[AnnotationUnderlayIP] == underlayIP {
+		return nil // already up to date
+	}
+
+	patch := client.MergeFrom(node.DeepCopy())
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	node.Annotations[AnnotationUnderlayIP] = underlayIP
+	if err := r.Patch(ctx, node, patch); err != nil {
+		return fmt.Errorf("failed to patch underlay-ip annotation on node %s: %w", r.MyNode, err)
+	}
+	return nil
+}
+
+// discoverRRNodeIPs returns the underlay NIC IPs (host part only) of all nodes
+// labeled openperouter.io/rr=true, excluding the local node.
+// The annotation stores "ip/mask"; this function returns just the IP.
+func (r *PERouterReconciler) discoverRRNodeIPs(ctx context.Context) ([]string, error) {
+	var nodeList v1.NodeList
+	if err := r.List(ctx, &nodeList, client.MatchingLabels{LabelRR: "true"}); err != nil {
+		return nil, fmt.Errorf("failed to list RR nodes: %w", err)
+	}
+
+	var ips []string
+	for _, n := range nodeList.Items {
+		if n.Name == r.MyNode {
+			continue // local node is the RR, not a client
+		}
+		cidr := n.Annotations[AnnotationUnderlayIP]
+		if cidr == "" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(cidr)
+		if err != nil {
+			slog.Error("failed to parse underlay-ip annotation", "node", n.Name, "value", cidr, "error", err)
+			continue
+		}
+		ips = append(ips, ip.String())
+	}
+	return ips, nil
 }
 
 func setPodNodeNameIndex(mgr ctrl.Manager) error {

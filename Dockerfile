@@ -35,6 +35,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
   && \
   CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -v -o hostbridge ./cmd/hostbridge \
   && \
+  CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -v -o rrcontroller ./cmd/rrcontroller \
+  && \
   CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -v -o operatorbinary ./operator
 
 FROM ${FRR_IMAGE}
@@ -43,6 +45,7 @@ COPY --from=builder /go/openperouter/reloader .
 COPY --from=builder /go/openperouter/controller .
 COPY --from=builder /go/openperouter/hostbridge .
 COPY --from=builder /go/openperouter/nodemarker .
+COPY --from=builder /go/openperouter/rrcontroller .
 COPY --from=builder /go/openperouter/operatorbinary ./operator
 COPY operator/bindata bindata
 # Copy FRR startup configuration to the default location

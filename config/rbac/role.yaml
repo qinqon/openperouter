@@ -45,6 +45,7 @@ rules:
   - l2vnis
   - l3passthroughs
   - l3vnis
+  - rawfrrconfigs
   - underlays
   verbs:
   - create
@@ -74,14 +75,6 @@ rules:
   - get
   - patch
   - update
-- apiGroups:
-  - openpe.openperouter.github.io
-  resources:
-  - rawfrrconfigs
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - openpe.openperouter.github.io
   resources:

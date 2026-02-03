@@ -62,6 +62,14 @@ Create the name of the openperouter service accounts to use
 {{- end }}
 {{- end }}
 
+{{- define "openperouter.rrcontroller.serviceAccountName" -}}
+{{- if .Values.openperouter.serviceAccounts.create }}
+{{- default (printf "%s-rr-controller" (include "openperouter.fullname" .)) .Values.routeReflector.serviceAccount.name }}
+{{- else }}
+{{- default "default-rr-controller" .Values.routeReflector.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
 {{- define "openperouter.router.serviceAccountName" -}}
 {{- if .Values.openperouter.serviceAccounts.create }}
 {{- default (printf "%s-perouter" (include "openperouter.fullname" .)) .Values.openperouter.serviceAccounts.perouter.name }}

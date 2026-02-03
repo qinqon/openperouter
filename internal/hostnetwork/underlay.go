@@ -140,6 +140,41 @@ func moveUnderlayInterface(ctx context.Context, underlayInterface string, ns net
 	return nil
 }
 
+// UnderlayInterfaceIP returns the first non-marker IPv4 address (with mask) assigned
+// to nicName inside the given network namespace.
+// The marker address (172.16.1.1/32) added during interface migration is skipped.
+// Returns an empty string when no qualifying address is found.
+func UnderlayInterfaceIP(nsPath, nicName string) (string, error) {
+	ns, err := netns.GetFromPath(nsPath)
+	if err != nil {
+		return "", fmt.Errorf("UnderlayInterfaceIP: failed to open namespace %s: %w", nsPath, err)
+	}
+	defer ns.Close() //nolint:errcheck
+
+	var result string
+	if err := netnamespace.In(ns, func() error {
+		link, err := netlink.LinkByName(nicName)
+		if err != nil {
+			return fmt.Errorf("failed to find interface %s: %w", nicName, err)
+		}
+		addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+		if err != nil {
+			return fmt.Errorf("failed to list addresses on %s: %w", nicName, err)
+		}
+		for _, addr := range addrs {
+			if addr.IPNet.String() == underlayInterfaceSpecialAddr {
+				continue
+			}
+			result = addr.IPNet.String()
+			return nil
+		}
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
 // HasUnderlayInterface returns true if the given network
 // namespace already has a configured underlay interface.
 func HasUnderlayInterface(namespace string) (bool, error) {

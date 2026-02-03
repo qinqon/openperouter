@@ -7,6 +7,8 @@ clab-kind-leafkind,eth1,192.168.1.5/31
 clab-kind-leafkind,toswitch,192.168.11.2/24
 pe-kind-control-plane,toswitch,192.168.11.3/24
 pe-kind-worker,toswitch,192.168.11.4/24
+pe-kind-worker2,toswitch,192.168.11.5/24
+pe-kind-worker3,toswitch,192.168.11.6/24
 clab-kind-leafA,ethred,192.168.20.1/24
 clab-kind-leafA,ethred,2001:db8:20::1/64
 clab-kind-hostA_red,eth1,192.168.20.2/24

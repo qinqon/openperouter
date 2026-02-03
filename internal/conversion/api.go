@@ -13,6 +13,9 @@ type ApiConfigData struct {
 	L2VNIs        []v1alpha1.L2VNI
 	L3Passthrough []v1alpha1.L3Passthrough
 	RawFRRConfigs []v1alpha1.RawFRRConfig
+	// RRNodeUnderlayIPs holds the underlay IPs of nodes labeled openperouter.io/rr=true.
+	// Populated by the hostcontroller; used to configure iBGP sessions to RR nodes.
+	RRNodeUnderlayIPs []string
 }
 
 type HostConfigData struct {

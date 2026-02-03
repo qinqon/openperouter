@@ -69,6 +69,20 @@ openperouter:
   # -- OVS run directory to mount. This is the directory containing the OVS socket.
   ovsRunDir: "/var/run/openvswitch"
 
+routeReflector:
+  # -- enabled deploys the RR controller Deployment (2 replicas) which configures
+  # two router pods as iBGP route reflectors for EVPN East/West distribution.
+  # When disabled (default), no RR controller is deployed and no iBGP sessions are established.
+  enabled: false
+  # -- replicas is the number of RR controller replicas (= number of RR nodes).
+  # Each replica lands on a different node via podAntiAffinity.
+  replicas: 2
+  # -- healthProbePort is the port for the RR controller health and readiness probes.
+  healthProbePort: 9082
+  serviceAccount:
+    name: ""
+  resources: {}
+
 webhook:
   enabled: true
 

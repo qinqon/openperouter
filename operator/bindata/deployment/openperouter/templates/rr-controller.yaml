@@ -1,0 +1,113 @@
+{{- if .Values.routeReflector.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    {{- include "openperouter.labels" . | nindent 4 }}
+    component: rr-controller
+    {{- range $key, $value := .Values.openperouter.labels }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  name: rr-controller
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.routeReflector.replicas }}
+  selector:
+    matchLabels:
+      {{- include "openperouter.selectorLabels" . | nindent 6 }}
+      component: rr-controller
+  template:
+    metadata:
+      labels:
+        {{- include "openperouter.selectorLabels" . | nindent 8 }}
+        component: rr-controller
+        app: openperouter-rr-controller
+        {{- range $key, $value := .Values.openperouter.labels }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ template "openperouter.rrcontroller.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: rr-controller
+        image: {{ .Values.openperouter.image.repository }}:{{ .Values.openperouter.image.tag | default .Chart.AppVersion }}
+        {{- if .Values.openperouter.image.pullPolicy }}
+        imagePullPolicy: {{ .Values.openperouter.image.pullPolicy }}
+        {{- end }}
+        command: ["/rrcontroller"]
+        args:
+        - --nodename=$(NODE_NAME)
+        - --namespace=$(NAMESPACE)
+        {{- with .Values.openperouter.logLevel }}
+        - --loglevel={{ . }}
+        {{- end }}
+        - --health-probe-bind-address=:{{ .Values.routeReflector.healthProbePort }}
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - containerPort: {{ .Values.routeReflector.healthProbePort }}
+          name: health
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: {{ .Values.routeReflector.healthProbePort }}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: {{ .Values.routeReflector.healthProbePort }}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+          timeoutSeconds: 1
+          failureThreshold: 3
+        {{- with .Values.routeReflector.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      affinity:
+        # RR controller pods must land on nodes that run router pods.
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: router
+            topologyKey: kubernetes.io/hostname
+        # Each replica must land on a different node.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                {{- include "openperouter.selectorLabels" . | nindent 16 }}
+                component: rr-controller
+            topologyKey: kubernetes.io/hostname
+      tolerations:
+      {{- if .Values.openperouter.runOnMaster }}
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+        operator: Exists
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/control-plane
+        operator: Exists
+      {{- end }}
+      {{- with .Values.openperouter.tolerations }}
+        {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.openperouter.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+{{- end }}

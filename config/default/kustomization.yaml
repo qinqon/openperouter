@@ -5,3 +5,7 @@ resources:
 - ../rbac
 - ../pods
 - ../webhook
+# Uncomment to enable the internal iBGP Route Reflector controller.
+# The RR controller deploys a 2-replica Deployment that configures two router pods
+# as iBGP route reflectors for EVPN East/West distribution.
+#- ../rr-controller

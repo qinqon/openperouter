@@ -70,6 +70,25 @@ spec:
                 description: OVSSocketPath specifies the OVS database socket path.
                   Defaults to standard OVS location if not specified.
                 type: string
+              routeReflector:
+                description: |-
+                  RouteReflector configures the internal iBGP route reflector deployment.
+                  When enabled, deploys a 2-replica RR controller that configures two router pods
+                  as iBGP route reflectors for EVPN East/West distribution.
+                properties:
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled deploys the RR controller Deployment which configures two router pods
+                      as iBGP route reflectors for EVPN East/West distribution.
+                    type: boolean
+                  replicas:
+                    default: 2
+                    description: Replicas is the number of RR controller replicas
+                      (= number of RR nodes).
+                    minimum: 1
+                    type: integer
+                type: object
               runOnMaster:
                 default: true
                 description: 'RunOnMaster determines if all pods (router, controller,

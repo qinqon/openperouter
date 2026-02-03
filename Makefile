@@ -95,6 +95,7 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/controller ./cmd/hostcontroller
 	go build -o bin/hostbridge ./cmd/hostbridge
 	go build -o bin/nodemarker ./cmd/nodemarker
+	go build -o bin/rrcontroller ./cmd/rrcontroller
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -236,9 +237,11 @@ deploy-controller-multi: kubectl kustomize ## Deploy controller to both clusters
 deploy-controller-cluster: kubectl kustomize ## Deploy controller to a specific cluster (internal target).
 	@echo "=== Deploying controller to cluster $(CLUSTER_NAME) ==="
 	cd config/pods && $(KUSTOMIZE) edit set image router=${IMG}
+	cd config/rr-controller && $(KUSTOMIZE) edit set image router=${IMG}
 	KUBECONFIG=$(CLUSTER_KUBECONFIG) $(KUBECTL) -n ${NAMESPACE} delete ds controller || true
 	KUBECONFIG=$(CLUSTER_KUBECONFIG) $(KUBECTL) -n ${NAMESPACE} delete ds router || true
 	KUBECONFIG=$(CLUSTER_KUBECONFIG) $(KUBECTL) -n ${NAMESPACE} delete deployment nodemarker || true
+	KUBECONFIG=$(CLUSTER_KUBECONFIG) $(KUBECTL) -n ${NAMESPACE} delete deployment rr-controller || true
 
 	# todo tweak loglevel
 	$(KUSTOMIZE) build config/$(KUSTOMIZE_LAYER) | KUBECONFIG=$(CLUSTER_KUBECONFIG) $(KUBECTL) apply -f -
@@ -257,6 +260,15 @@ deploy-helm: helm kind deploy-cluster
 	--set openperouter.image.pullPolicy=IfNotPresent --set openperouter.logLevel=debug --namespace ${NAMESPACE} $(HELM_ARGS)
 	sleep 2s # wait for daemonset to be created
 	$(KUBECTL) -n ${NAMESPACE} wait --for=condition=Ready --all pods --timeout 300s
+
+.PHONY: deploy-helm-with-rr
+deploy-helm-with-rr: ## Deploy with Helm including the internal iBGP Route Reflector controller.
+deploy-helm-with-rr: HELM_ARGS=--set routeReflector.enabled=true
+deploy-helm-with-rr: deploy-helm
+
+.PHONY: deploy-with-rr
+deploy-with-rr: export KUSTOMIZE_LAYER=with-rr
+deploy-with-rr: deploy ## Deploy with Kustomize including the internal iBGP Route Reflector controller.
 
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

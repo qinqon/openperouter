@@ -1,0 +1,18 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pe-kind
+nodes:
+- role: control-plane
+  image: quay.io/openperouter/kind-node-openperouter:v1.32.2
+- role: worker
+  image: quay.io/openperouter/kind-node-openperouter:v1.32.2
+- role: worker
+  image: quay.io/openperouter/kind-node-openperouter:v1.32.2
+- role: worker
+  image: quay.io/openperouter/kind-node-openperouter:v1.32.2
+networking:
+  ipFamily: dual
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5000"]
+    endpoint = ["http://kind-registry:5000"]

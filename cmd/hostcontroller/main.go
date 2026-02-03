@@ -430,8 +430,9 @@ func createK8sManager(
 		// since nodes receive frequent updates in some environments.
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
+				// Watch all nodes so that RR label / underlay-ip annotation changes on
+				// any node can trigger reconciliation on this node's hostcontroller.
 				&corev1.Node{}: {
-					Field:     fields.Set{"metadata.name": nodeName}.AsSelector(),
 					Transform: cache.TransformStripManagedFields(),
 				},
 				&corev1.Pod{}: {

@@ -142,4 +142,13 @@ func patchChartValues(envConfig envconfig.EnvConfig, crdConfig *operatorapi.Open
 	valuesMap["webhook"] = map[string]interface{}{
 		"enabled": false,
 	}
+
+	rrEnabled := crdConfig.Spec.RouteReflector != nil && crdConfig.Spec.RouteReflector.Enabled
+	rrValues := map[string]interface{}{
+		"enabled": rrEnabled,
+	}
+	if rrEnabled && crdConfig.Spec.RouteReflector.Replicas > 0 {
+		rrValues["replicas"] = crdConfig.Spec.RouteReflector.Replicas
+	}
+	valuesMap["routeReflector"] = rrValues
 }

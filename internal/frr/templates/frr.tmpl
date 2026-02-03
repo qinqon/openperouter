@@ -57,6 +57,17 @@ router bgp {{ .Underlay.MyASN }}
 {{- template "underlayevpn" . -}}
 {{- end }}
 
+{{- range .Underlay.RRClients }}
+{{- template "neighborsession" dict "neighbor" . "routerASN" $.Underlay.MyASN }}
+{{- end }}
+{{- if .Underlay.RRClients }}
+  address-family l2vpn evpn
+{{- range .Underlay.RRClients }}
+    neighbor {{ .Addr }} activate
+{{- end }}
+  exit-address-family
+{{- end }}
+
 {{- end }}
 
 {{- range .VNIs }}
