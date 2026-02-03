@@ -118,3 +118,4 @@ spec:
       serviceAccountName: controller
       hostNetwork: true
       hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet

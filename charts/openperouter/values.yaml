@@ -75,3 +75,34 @@ webhook:
 crds:
   enabled: true
   validationFailurePolicy: Fail
+
+# Route Reflector configuration
+# Deploys an internal BGP Route Reflector for EVPN route distribution
+routeReflector:
+  # -- Enable the Route Reflector StatefulSet
+  enabled: false
+  # -- Number of RR replicas (2 recommended for HA)
+  replicas: 2
+  # -- BGP ASN for the Route Reflector (should match router pods for iBGP)
+  asn: 65000
+  # -- BGP cluster ID for route reflection
+  clusterID: "1.1.1.1"
+  # -- Pod CIDR for dynamic peer acceptance (accepts iBGP from any pod in this range)
+  podCIDR: "10.244.0.0/16"
+  # -- FRR image configuration
+  image:
+    repository: quay.io/frrouting/frr
+    tag: "10.3.1"
+    pullPolicy: IfNotPresent
+  # -- Node selector for RR pods
+  nodeSelector: {}
+  # -- Tolerations for RR pods
+  tolerations: []
+  # -- Resource limits and requests
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi

@@ -250,6 +250,22 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              routeReflector:
+                description: |-
+                  RouteReflector configures automatic iBGP peering with Route Reflector pods.
+                  When configured, the controller will watch RR pods and automatically add them
+                  as iBGP neighbors using their current pod IPs.
+                properties:
+                  type:
+                    description: |-
+                      Type specifies the type of route reflector to use.
+                      Currently only "Internal" is supported, which uses the RR pods deployed by OpenPERouter.
+                    enum:
+                    - Internal
+                    type: string
+                required:
+                - type
+                type: object
               routeridcidr:
                 default: 10.0.0.0/24
                 description: RouterIDCIDR is the ipv4 cidr to be used to assign a

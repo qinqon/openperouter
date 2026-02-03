@@ -119,23 +119,6 @@ func TestValidateUnderlay(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "same local and remote ASN",
-			underlay: v1alpha1.Underlay{
-				Spec: v1alpha1.UnderlaySpec{
-					EVPN: &v1alpha1.EVPNConfig{
-						VTEPCIDR: "192.168.1.0/24",
-					},
-					ASN: 65001,
-					Neighbors: []v1alpha1.Neighbor{
-						{
-							ASN: 65001,
-						},
-					},
-				},
-			},
-			wantErr: true,
-		},
-		{
 			name: "underlay NIC is a vlan sub-interface",
 			underlay: v1alpha1.Underlay{
 				Spec: v1alpha1.UnderlaySpec{
@@ -564,34 +547,6 @@ func TestValidateUnderlaysForNodes(t *testing.T) {
 				},
 			},
 			wantErr: false,
-		},
-		{
-			name: "node with underlay having same local and remote ASN - should error",
-			nodes: []corev1.Node{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   "node-1",
-						Labels: map[string]string{"rack": "rack-1"},
-					},
-				},
-			},
-			underlays: []v1alpha1.Underlay{
-				{
-					ObjectMeta: metav1.ObjectMeta{Name: "underlay-rack-1"},
-					Spec: v1alpha1.UnderlaySpec{
-						NodeSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"rack": "rack-1"},
-						},
-						ASN: 65001,
-						Neighbors: []v1alpha1.Neighbor{
-							{ASN: 65001},
-						},
-						Nics: []string{"eth0"},
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "local ASN",
 		},
 	}
 

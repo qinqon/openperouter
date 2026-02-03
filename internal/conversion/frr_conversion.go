@@ -53,6 +53,19 @@ func APItoFRR(config ApiConfigData) (frr.Config, error) {
 		}
 	}
 
+	// Add internal Route Reflector neighbors if configured
+	if underlay.Spec.RouteReflector != nil && underlay.Spec.RouteReflector.Type == v1alpha1.RouteReflectorTypeInternal {
+		for _, rrIP := range config.RouteReflectorIPs {
+			rrNeighbor := frr.NeighborConfig{
+				Name:     fmt.Sprintf("rr@%s", rrIP),
+				ASN:      underlay.Spec.ASN, // iBGP - same ASN
+				Addr:     rrIP,
+				IPFamily: ipfamily.ForAddressString(rrIP),
+			}
+			underlayNeighbors = append(underlayNeighbors, rrNeighbor)
+		}
+	}
+
 	routerID, err := routerIDFromUnderlay(underlay, config.NodeIndex)
 	if err != nil {
 		return frr.Config{}, fmt.Errorf("failed to get routerID: %w", err)
@@ -225,6 +238,7 @@ func createVNIConfig(vni v1alpha1.L3VNI, hostIP net.IP, mask net.IPMask, routerI
 	config.ToAdvertiseIPv6 = []string{ipnet.String()}
 	return config
 }
+
 
 func neighborToFRR(n v1alpha1.Neighbor) (*frr.NeighborConfig, error) {
 	neighborFamily, err := ipfamily.ForAddresses(n.Address)

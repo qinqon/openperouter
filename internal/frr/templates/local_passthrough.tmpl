@@ -14,7 +14,7 @@
     neighbor {{ .Passthrough.LocalNeighborV4.Addr }} route-map allowall out
   exit-address-family
 
-{{- template "neighborenableipfamily" .Passthrough.LocalNeighborV4 }}
+{{- template "neighborenableipfamily" dict "neighbor" .Passthrough.LocalNeighborV4 "routerASN" .Underlay.MyASN }}
 {{- end -}}
 
 {{- if .Passthrough.LocalNeighborV6 }}
@@ -30,7 +30,7 @@
     neighbor {{ .Passthrough.LocalNeighborV6.Addr }} route-map allowall in
     neighbor {{ .Passthrough.LocalNeighborV6.Addr }} route-map allowall out
   exit-address-family
-{{- template "neighborenableipfamily" .Passthrough.LocalNeighborV6 }}
+{{- template "neighborenableipfamily" dict "neighbor" .Passthrough.LocalNeighborV6 "routerASN" .Underlay.MyASN }}
 {{- end -}}
 {{- end }}
 

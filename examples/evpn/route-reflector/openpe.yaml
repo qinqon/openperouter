@@ -1,0 +1,68 @@
+# Example configuration using the internal Route Reflector
+#
+# This example shows how to configure an Underlay to peer with:
+# 1. An external ToR switch for IPv4/IPv6 routes (eBGP)
+# 2. The internal Route Reflector for EVPN route distribution (iBGP)
+#
+# Deploy the Route Reflector first:
+#   helm upgrade --install openperouter ./charts/openperouter \
+#     --namespace openperouter-system --create-namespace \
+#     --set routeReflector.enabled=true \
+#     --set routeReflector.asn=64514 \
+#     --set routeReflector.clusterID="1.1.1.1" \
+#     --set routeReflector.podCIDR="10.244.0.0/16"
+#
+# Then apply this configuration:
+#   kubectl apply -f openpe.yaml
+#
+# Finally deploy workloads:
+#   kubectl apply -f workload.yaml
+---
+apiVersion: openpe.openperouter.github.io/v1alpha1
+kind: L3VNI
+metadata:
+  name: red
+  namespace: openperouter-system
+spec:
+  vrf: red
+  hostsession:
+    asn: 64514
+    hostasn: 64515
+    localcidr:
+      ipv4: 192.169.10.0/24
+  vni: 100
+---
+apiVersion: openpe.openperouter.github.io/v1alpha1
+kind: L2VNI
+metadata:
+  name: layer2
+  namespace: openperouter-system
+spec:
+  vni: 110
+  vrf: red
+  hostmaster:
+    type: linux-bridge
+    linuxBridge:
+      autoCreate: true
+  l2gatewayips: ["192.170.1.1/24"]
+---
+apiVersion: openpe.openperouter.github.io/v1alpha1
+kind: Underlay
+metadata:
+  name: underlay
+  namespace: openperouter-system
+spec:
+  asn: 64514
+  evpn:
+    vtepcidr: 100.65.0.0/24
+  nics:
+    - toswitch
+  neighbors:
+    # External ToR peering (eBGP) - for IPv4/IPv6 routes
+    - asn: 64512
+      address: 192.168.11.2
+
+  # Use internal Route Reflector - controller auto-discovers RR pod IPs
+  # and updates FRR config when pods restart with new IPs
+  routeReflector:
+    type: Internal

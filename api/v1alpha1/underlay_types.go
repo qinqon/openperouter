@@ -50,6 +50,30 @@ type UnderlaySpec struct {
 	Nics []string `json:"nics,omitempty"`
 
 	EVPN *EVPNConfig `json:"evpn,omitempty"`
+
+	// RouteReflector configures automatic iBGP peering with Route Reflector pods.
+	// When configured, the controller will watch RR pods and automatically add them
+	// as iBGP neighbors using their current pod IPs.
+	// +optional
+	RouteReflector *RouteReflectorConfig `json:"routeReflector,omitempty"`
+}
+
+// RouteReflectorType specifies the type of route reflector to use.
+// +kubebuilder:validation:Enum=Internal
+type RouteReflectorType string
+
+const (
+	// RouteReflectorTypeInternal uses the internal Route Reflector pods deployed
+	// by OpenPERouter. The controller will automatically discover RR pod IPs.
+	RouteReflectorTypeInternal RouteReflectorType = "Internal"
+)
+
+// RouteReflectorConfig configures route reflector peering.
+type RouteReflectorConfig struct {
+	// Type specifies the type of route reflector to use.
+	// Currently only "Internal" is supported, which uses the RR pods deployed by OpenPERouter.
+	// +kubebuilder:validation:Required
+	Type RouteReflectorType `json:"type"`
 }
 
 type EVPNConfig struct {

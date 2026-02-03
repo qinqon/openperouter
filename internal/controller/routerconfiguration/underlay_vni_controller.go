@@ -133,6 +133,20 @@ func (r *PERouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		slog.Error("failed to get node index", "error", err)
 		return ctrl.Result{}, err
 	}
+
+	// Get Route Reflector IPs if any underlay uses internal RR
+	var rrIPs []string
+	for _, u := range filteredUnderlays {
+		if u.Spec.RouteReflector != nil && u.Spec.RouteReflector.Type == v1alpha1.RouteReflectorTypeInternal {
+			rrIPs, err = r.getRouteReflectorIPs(ctx)
+			if err != nil {
+				slog.Error("failed to get route reflector IPs", "error", err)
+				return ctrl.Result{}, err
+			}
+			break
+		}
+	}
+
 	logger.Debug("using config", "l3vnis", l3vnis.Items, "l2vnis", l2vnis.Items, "underlays", underlays.Items, "l3passthrough", l3passthrough.Items)
 	apiConfig := conversion.ApiConfigData{
 		NodeIndex:          nodeIndex,
@@ -142,6 +156,7 @@ func (r *PERouterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		L3VNIs:             filteredL3VNIs,
 		L2VNIs:             filteredL2VNIs,
 		L3Passthrough:      filteredL3Passthrough,
+		RouteReflectorIPs:  rrIPs,
 	}
 
 	router, err := r.RouterProvider.New(ctx)
@@ -184,16 +199,20 @@ func (r *PERouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	filterNonRouterPods := predicate.NewPredicateFuncs(func(object client.Object) bool {
 		switch o := object.(type) {
 		case *v1.Pod:
-			if o.Spec.NodeName != r.MyNode {
-				return false
-			}
 			if o.Namespace != r.MyNamespace {
 				return false
 			}
 
-			if o.Labels != nil && o.Labels["app"] == "router" { // interested only in the router pod
+			// Watch router pods on this node
+			if o.Spec.NodeName == r.MyNode && o.Labels != nil && o.Labels["app"] == "router" {
 				return true
 			}
+
+			// Watch Route Reflector pods (any node) to detect IP changes
+			if o.Labels != nil && o.Labels[rrLabelComponent] == rrLabelComponentValue {
+				return true
+			}
+
 			return false
 		default:
 			return true
@@ -212,10 +231,17 @@ func (r *PERouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				oldLabels := labels.Set(old.Labels)
 				newLabels := labels.Set(o.Labels)
 				return !labels.Equals(oldLabels, newLabels)
-			case *v1.Pod: // handle only status updates
+			case *v1.Pod:
 				old := e.ObjectOld.(*v1.Pod)
+				// Handle readiness changes
 				if PodIsReady(old) != PodIsReady(o) {
 					return true
+				}
+				// Handle RR pod IP changes
+				if o.Labels != nil && o.Labels[rrLabelComponent] == rrLabelComponentValue {
+					if old.Status.PodIP != o.Status.PodIP {
+						return true
+					}
 				}
 				return false
 			}
@@ -237,6 +263,32 @@ func (r *PERouterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		WithEventFilter(filterUpdates).
 		Named("routercontroller").
 		Complete(r)
+}
+
+// RouteReflector pod labels
+const (
+	rrLabelName      = "app.kubernetes.io/name"
+	rrLabelNameValue = "openperouter-rr"
+	rrLabelComponent = "app.kubernetes.io/component"
+	rrLabelComponentValue = "route-reflector"
+)
+
+// getRouteReflectorIPs returns the IP addresses of all ready Route Reflector pods.
+func (r *PERouterReconciler) getRouteReflectorIPs(ctx context.Context) ([]string, error) {
+	var pods v1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(r.MyNamespace), client.MatchingLabels{
+		rrLabelComponent: rrLabelComponentValue,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to list route reflector pods: %w", err)
+	}
+
+	var ips []string
+	for _, pod := range pods.Items {
+		if pod.Status.PodIP != "" && PodIsReady(&pod) {
+			ips = append(ips, pod.Status.PodIP)
+		}
+	}
+	return ips, nil
 }
 
 func setPodNodeNameIndex(mgr ctrl.Manager) error {

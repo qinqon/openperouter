@@ -364,6 +364,54 @@ func TestPassthroughV4(t *testing.T) {
 	testCheckConfigFile(t)
 }
 
+func TestMixedIBGPAndEBGPNeighbors(t *testing.T) {
+	configFile := testSetup(t)
+	updater := testUpdater(configFile)
+
+	config := Config{
+		Underlay: UnderlayConfig{
+			MyASN: 64514,
+			EVPN: &UnderlayEvpn{
+				VTEP: "100.65.0.1/32",
+			},
+			RouterID: "10.0.0.1",
+			Neighbors: []NeighborConfig{
+				{
+					// eBGP neighbor (ToR) - should have allowas-in
+					ASN:      64512,
+					Addr:     "192.168.11.2",
+					IPFamily: ipfamily.IPv4,
+				},
+				{
+					// iBGP neighbor (Route Reflector) - should NOT have allowas-in
+					ASN:      64514,
+					Addr:     "10.244.0.10",
+					IPFamily: ipfamily.IPv4,
+				},
+				{
+					// iBGP neighbor (Route Reflector 2) - should NOT have allowas-in
+					ASN:      64514,
+					Addr:     "10.244.0.11",
+					IPFamily: ipfamily.IPv4,
+				},
+			},
+		},
+		VNIs: []L3VNIConfig{
+			{
+				VRF:      "red",
+				ASN:      64514,
+				VNI:      100,
+				RouterID: "10.0.0.1",
+			},
+		},
+	}
+	if err := ApplyConfig(context.TODO(), &config, updater); err != nil {
+		t.Fatalf("Failed to apply config: %s", err)
+	}
+
+	testCheckConfigFile(t)
+}
+
 func TestPassthroughDual(t *testing.T) {
 	configFile := testSetup(t)
 	updater := testUpdater(configFile)

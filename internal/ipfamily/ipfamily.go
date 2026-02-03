@@ -98,6 +98,16 @@ func ForAddress(ip net.IP) Family {
 	return IPv4
 }
 
+// ForAddressString returns the address family for a given address string.
+// Returns Unknown if the address is not a valid IP.
+func ForAddressString(addr string) Family {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return Unknown
+	}
+	return ForAddress(ip)
+}
+
 // ForService returns the address family of a given service.
 func ForService(svc *v1.Service) (Family, error) {
 	if len(svc.Spec.ClusterIPs) > 0 {

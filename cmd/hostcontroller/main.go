@@ -26,7 +26,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
@@ -171,10 +170,10 @@ func main() {
 					Field:     fields.Set{"metadata.name": k8sModeParams.nodeName}.AsSelector(),
 					Transform: cache.TransformStripManagedFields(),
 				},
+				// Cache all pods in our namespace - both router pods and RR pods.
+				// The controller's event filter handles which pods trigger reconciliation.
 				&corev1.Pod{}: {
-					Label: labels.SelectorFromSet(labels.Set{"app": "router"}),
 					Field: fields.Set{
-						"spec.nodeName":      k8sModeParams.nodeName,
 						"metadata.namespace": k8sModeParams.namespace,
 					}.AsSelector(),
 				},

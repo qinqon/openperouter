@@ -15,6 +15,9 @@ type ApiConfigData struct {
 	L2VNIs             []v1alpha1.L2VNI
 	L3Passthrough      []v1alpha1.L3Passthrough
 	LogLevel           string
+	// RouteReflectorIPs contains the IP addresses of internal Route Reflector pods.
+	// These are automatically populated when RouteReflector.Type is "Internal".
+	RouteReflectorIPs []string
 }
 
 type HostConfigData struct {

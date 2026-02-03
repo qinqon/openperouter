@@ -1,0 +1,193 @@
+{{- if .Values.routeReflector.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ template "openperouter.fullname" . }}-rr-config
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "openperouter.labels" . | nindent 4 }}
+    app.kubernetes.io/component: route-reflector
+data:
+  daemons: |
+    bgpd=yes
+    ospfd=no
+    ospf6d=no
+    ripd=no
+    ripngd=no
+    isisd=no
+    pimd=no
+    ldpd=no
+    nhrpd=no
+    eigrpd=no
+    babeld=no
+    sharpd=no
+    pbrd=no
+    bfdd=yes
+    fabricd=no
+    vrrpd=no
+    vtysh_enable=yes
+    zebra_options="  -A 127.0.0.1 -s 90000000"
+    bgpd_options="   -A 127.0.0.1"
+    staticd_options="-A 127.0.0.1"
+    bfdd_options="   -A 127.0.0.1"
+  frr.conf: |
+    frr version 10.3
+    frr defaults traditional
+    hostname route-reflector
+    log syslog informational
+    service integrated-vtysh-config
+
+    router bgp {{ .Values.routeReflector.asn }}
+      bgp router-id {{ .Values.routeReflector.clusterID }}
+      bgp cluster-id {{ .Values.routeReflector.clusterID }}
+      no bgp ebgp-requires-policy
+      no bgp default ipv4-unicast
+
+      ! Define peer-group first
+      neighbor CLIENTS peer-group
+      neighbor CLIENTS remote-as {{ .Values.routeReflector.asn }}
+
+      ! Accept iBGP clients dynamically from cluster pod CIDR
+      bgp listen range {{ .Values.routeReflector.podCIDR }} peer-group CLIENTS
+
+      address-family l2vpn evpn
+        neighbor CLIENTS activate
+        neighbor CLIENTS route-reflector-client
+      exit-address-family
+  vtysh.conf: |
+    service integrated-vtysh-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ template "openperouter.fullname" . }}-rr
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "openperouter.labels" . | nindent 4 }}
+    app.kubernetes.io/component: route-reflector
+spec:
+  clusterIP: None
+  selector:
+    {{- include "openperouter.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: route-reflector
+  ports:
+    - port: 179
+      targetPort: 179
+      name: bgp
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ template "openperouter.fullname" . }}-rr
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "openperouter.labels" . | nindent 4 }}
+    app.kubernetes.io/component: route-reflector
+spec:
+  serviceName: {{ template "openperouter.fullname" . }}-rr
+  replicas: {{ .Values.routeReflector.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "openperouter.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: route-reflector
+  template:
+    metadata:
+      labels:
+        {{- include "openperouter.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: route-reflector
+      annotations:
+        kubectl.kubernetes.io/default-container: frr
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "openperouter.selectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: route-reflector
+                topologyKey: kubernetes.io/hostname
+      {{- with .Values.routeReflector.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.routeReflector.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: cp-frr-files
+          image: {{ .Values.routeReflector.image.repository }}:{{ .Values.routeReflector.image.tag }}
+          imagePullPolicy: {{ .Values.routeReflector.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cp -rLf /tmp/frr/* /etc/frr/"]
+          volumeMounts:
+            - name: frr-startup
+              mountPath: /tmp/frr
+            - name: frrconfig
+              mountPath: /etc/frr
+      containers:
+        - name: frr
+          image: {{ .Values.routeReflector.image.repository }}:{{ .Values.routeReflector.image.tag }}
+          imagePullPolicy: {{ .Values.routeReflector.image.pullPolicy }}
+          ports:
+            - containerPort: 179
+              name: bgp
+              protocol: TCP
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+                - NET_BIND_SERVICE
+                - SYS_ADMIN
+          volumeMounts:
+            - name: frrconfig
+              mountPath: /etc/frr
+            - name: frr-sockets
+              mountPath: /var/run/frr
+          command:
+            - /bin/sh
+            - -c
+            - |
+              /usr/lib/frr/docker-start &
+              FRR_PID=$!
+              # Wait for FRR to be ready
+              sleep 5
+              # Keep container running
+              wait $FRR_PID
+          livenessProbe:
+            exec:
+              command:
+                - vtysh
+                - -c
+                - show bgp summary
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 179
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          {{- with .Values.routeReflector.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: frr-startup
+          configMap:
+            name: {{ template "openperouter.fullname" . }}-rr-config
+        - name: frrconfig
+          emptyDir: {}
+        - name: frr-sockets
+          emptyDir: {}
+      terminationGracePeriodSeconds: 10
+{{- end }}
