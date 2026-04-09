@@ -27,6 +27,12 @@ func setupVXLan(params VNIParams, bridge *netlink.Bridge) error {
 		return fmt.Errorf("failed to set neigh suppression for %s: %w", vxlan.Name, err)
 	}
 
+	if params.UnderlayMTU > 0 {
+		if err := setLinkMTU(vxlan, vxlanMTU(params.UnderlayMTU)); err != nil {
+			return fmt.Errorf("failed to set MTU on vxlan %s: %w", vxlan.Name, err)
+		}
+	}
+
 	if err = netlink.LinkSetUp(vxlan); err != nil {
 		return fmt.Errorf("could not set link up for vxlan %s: %v", vxlan.Name, err)
 	}

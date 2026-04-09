@@ -14,7 +14,8 @@ import (
 
 // createHostBridge creates a bridge on the host namespace named after the
 // provided vni. If the bridge already exists, it will return the existing one.
-func createHostBridge(vni int) (netlink.Link, error) {
+// If mtu > 0, the bridge MTU is set accordingly.
+func createHostBridge(vni int, mtu int) (netlink.Link, error) {
 	name := hostBridgeName(vni)
 	_, err := netlink.LinkByName(name)
 	// link does not exist, let's create it
@@ -27,6 +28,9 @@ func createHostBridge(vni int) (netlink.Link, error) {
 	bridge, err := netlink.LinkByName(name)
 	if err != nil {
 		return nil, fmt.Errorf("could not find host bridge %s: %w", name, err)
+	}
+	if err := setLinkMTU(bridge, mtu); err != nil {
+		return nil, fmt.Errorf("could not set host bridge %s MTU: %w", name, err)
 	}
 	if err := netlink.LinkSetUp(bridge); err != nil {
 		return nil, fmt.Errorf("could not set host bridge %s up: %w", name, err)

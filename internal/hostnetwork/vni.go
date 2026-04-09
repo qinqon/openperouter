@@ -14,11 +14,12 @@ import (
 )
 
 type VNIParams struct {
-	VRF       string `json:"vrf"`
-	TargetNS  string `json:"targetns"`
-	VTEPIP    string `json:"vtepip"`
-	VNI       int    `json:"vni"`
-	VXLanPort int    `json:"vxlanport"`
+	VRF         string `json:"vrf"`
+	TargetNS    string `json:"targetns"`
+	VTEPIP      string `json:"vtepip"`
+	VNI         int    `json:"vni"`
+	VXLanPort   int    `json:"vxlanport"`
+	UnderlayMTU int    `json:"underlaymtu"`
 }
 
 type L3VNIParams struct {
@@ -54,7 +55,15 @@ const (
 	VRFLinkType    = "vrf"
 	BridgeLinkType = "bridge"
 	VXLanLinkType  = "vxlan"
+	vxlanOverhead  = 50
 )
+
+// vxlanMTU returns the MTU to use for overlay interfaces
+// given the underlay MTU. VXLAN encapsulation adds 50 bytes
+// of overhead (outer Ethernet + IP + UDP + VXLAN headers).
+func vxlanMTU(underlayMTU int) int {
+	return underlayMTU - vxlanOverhead
+}
 
 type NotRouterInterfaceError struct {
 	Name string
@@ -99,6 +108,12 @@ func SetupL3VNI(ctx context.Context, params L3VNIParams) error {
 		return fmt.Errorf("SetupL3VNI: host veth %s does not exist, cannot setup L3 VNI", vethNames.HostSide)
 	}
 
+	if params.UnderlayMTU > 0 {
+		if err := setLinkMTU(hostVeth, vxlanMTU(params.UnderlayMTU)); err != nil {
+			return fmt.Errorf("SetupL3VNI: failed to set MTU on host veth %s: %w", vethNames.HostSide, err)
+		}
+	}
+
 	err = assignIPsToInterface(hostVeth, params.HostVeth.HostIPv4, params.HostVeth.HostIPv6)
 	if err != nil {
 		return fmt.Errorf("failed to assign IPs to host veth: %w", err)
@@ -108,6 +123,12 @@ func SetupL3VNI(ctx context.Context, params L3VNIParams) error {
 		peVeth, err := netlink.LinkByName(vethNames.NamespaceSide)
 		if err != nil {
 			return fmt.Errorf("could not find peer veth %s in namespace %s: %w", vethNames.NamespaceSide, params.TargetNS, err)
+		}
+
+		if params.UnderlayMTU > 0 {
+			if err := setLinkMTU(peVeth, vxlanMTU(params.UnderlayMTU)); err != nil {
+				return fmt.Errorf("failed to set MTU on PE veth %s: %w", peVeth.Attrs().Name, err)
+			}
 		}
 
 		vrf, err := netlink.LinkByName(params.VRF)
@@ -163,8 +184,14 @@ func SetupL2VNI(ctx context.Context, params L2VNIParams) error {
 		return fmt.Errorf("SetupL2VNI: host veth %s does not exist, cannot setup L3 VNI", vethNames.HostSide)
 	}
 
+	if params.UnderlayMTU > 0 {
+		if err := setLinkMTU(hostVeth, vxlanMTU(params.UnderlayMTU)); err != nil {
+			return fmt.Errorf("SetupL2VNI: failed to set MTU on host veth %s: %w", vethNames.HostSide, err)
+		}
+	}
+
 	if params.HostMaster != nil {
-		master, err := hostMaster(params.VNI, *params.HostMaster)
+		master, err := hostMaster(params.VNI, *params.HostMaster, vxlanMTU(params.UnderlayMTU))
 		if err != nil {
 			return fmt.Errorf("SetupL2VNI: failed to get host master for VRF %s: %w", params.VRF, err)
 		}
@@ -178,6 +205,13 @@ func SetupL2VNI(ctx context.Context, params L2VNIParams) error {
 		if err != nil {
 			return fmt.Errorf("could not find peer veth %s in namespace %s: %w", vethNames.NamespaceSide, params.TargetNS, err)
 		}
+
+		if params.UnderlayMTU > 0 {
+			if err := setLinkMTU(peVeth, vxlanMTU(params.UnderlayMTU)); err != nil {
+				return fmt.Errorf("failed to set MTU on PE veth %s: %w", peVeth.Attrs().Name, err)
+			}
+		}
+
 		name := bridgeName(params.VNI)
 		bridge, err := netlink.LinkByName(name)
 		if err != nil {
@@ -365,7 +399,7 @@ func deleteLinksForType(linkType string, vnis map[int]bool, links []netlink.Link
 	return errors.Join(deleteErrors...)
 }
 
-func hostMaster(vni int, m HostMaster) (netlink.Link, error) {
+func hostMaster(vni int, m HostMaster, mtu int) (netlink.Link, error) {
 	if !m.AutoCreate {
 		hostMaster, err := netlink.LinkByName(m.Name)
 		if err != nil {
@@ -373,7 +407,7 @@ func hostMaster(vni int, m HostMaster) (netlink.Link, error) {
 		}
 		return hostMaster, nil
 	}
-	bridge, err := createHostBridge(vni)
+	bridge, err := createHostBridge(vni, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("getHostMaster: failed to create host bridge %d: %w", vni, err)
 	}

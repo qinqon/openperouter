@@ -155,6 +155,33 @@ func HasUnderlayInterface(namespace string) (bool, error) {
 	return underlayInterface != "", nil
 }
 
+// UnderlayInterfaceMTU returns the MTU of the underlay interface
+// inside the given namespace.
+func UnderlayInterfaceMTU(namespace string, underlayInterface string) (int, error) {
+	ns, err := netns.GetFromName(namespace)
+	if err != nil {
+		return 0, fmt.Errorf("UnderlayInterfaceMTU: failed to get namespace %s: %w", namespace, err)
+	}
+	defer func() {
+		if err := ns.Close(); err != nil {
+			slog.Error("failed to close namespace", "namespace", namespace, "error", err)
+		}
+	}()
+
+	var mtu int
+	if err := inNamespace(ns, func() error {
+		link, err := netlink.LinkByName(underlayInterface)
+		if err != nil {
+			return fmt.Errorf("failed to get underlay interface %s: %w", underlayInterface, err)
+		}
+		mtu = link.Attrs().MTU
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	return mtu, nil
+}
+
 // findInterfaceWithIP retrieves the interface assigned to the given ip
 // in the given network ns.
 func findInterfaceWithIP(ns netns.NsHandle, ip string) (string, error) {

@@ -27,6 +27,12 @@ func setupBridge(params VNIParams, vrf *netlink.Vrf) (*netlink.Bridge, error) {
 		return nil, fmt.Errorf("failed to set addr_gen_mode to 1 for %s: %w", bridge.Name, err)
 	}
 
+	if params.UnderlayMTU > 0 {
+		if err := setLinkMTU(bridge, vxlanMTU(params.UnderlayMTU)); err != nil {
+			return nil, fmt.Errorf("failed to set MTU on bridge %s: %w", bridge.Name, err)
+		}
+	}
+
 	err = netlink.LinkSetUp(bridge)
 	if err != nil {
 		return nil, fmt.Errorf("could not set link up for bridge %s: %v", name, err)
