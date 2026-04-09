@@ -19,6 +19,7 @@ import (
 )
 
 const testNSName = "vnitestns"
+const testUnderlayMTU = 1500
 
 var _ = Describe("L3 VNI configuration", func() {
 	var testNS netns.NsHandle
@@ -35,11 +36,12 @@ var _ = Describe("L3 VNI configuration", func() {
 	It("should work with IPv4 only L3VNI", func() {
 		params := L3VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			HostVeth: &Veth{
 				HostIPv4: "192.168.9.1/32",
@@ -63,11 +65,12 @@ var _ = Describe("L3 VNI configuration", func() {
 	It("should work with IPv6 only L3VNI", func() {
 		params := L3VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			HostVeth: &Veth{
 				HostIPv6: "2001:db8::1/128",
@@ -91,11 +94,12 @@ var _ = Describe("L3 VNI configuration", func() {
 	It("should work with dual-stack L3VNI", func() {
 		params := L3VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			HostVeth: &Veth{
 				HostIPv4: "192.168.9.1/32",
@@ -190,11 +194,12 @@ var _ = Describe("L3 VNI configuration", func() {
 	It("should be idempotent", func() {
 		params := L3VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			HostVeth: &Veth{
 				HostIPv4: "192.168.9.1/32",
@@ -222,11 +227,12 @@ var _ = Describe("L3 VNI configuration", func() {
 	It("should configure VXLAN and VRF when HostVeth is nil", func() {
 		params := L3VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			HostVeth: nil,
 		}
@@ -265,11 +271,12 @@ var _ = Describe("L2 VNI configuration", func() {
 	It("should work with a single L2VNI", func() {
 		params := L2VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			L2GatewayIP: ptr.String("192.168.1.0/24"),
 			HostMaster: &HostMaster{
@@ -381,11 +388,12 @@ var _ = Describe("L2 VNI configuration", func() {
 	It("should be idempotent", func() {
 		params := L2VNIParams{
 			VNIParams: VNIParams{
-				VRF:       "testred",
-				TargetNS:  testNSName,
-				VTEPIP:    "192.170.0.9/32",
-				VNI:       100,
-				VXLanPort: 4789,
+				VRF:         "testred",
+				TargetNS:    testNSName,
+				VTEPIP:      "192.170.0.9/32",
+				VNI:         100,
+				VXLanPort:   4789,
+				UnderlayMTU: testUnderlayMTU,
 			},
 			L2GatewayIP: ptr.String("192.168.1.0/24"),
 			HostMaster: &HostMaster{
@@ -417,6 +425,11 @@ func validateL3HostLeg(g Gomega, params L3VNIParams) {
 
 	g.Expect(hostLegLink.Attrs().OperState).To(BeEquivalentTo(netlink.OperUp))
 
+	if params.UnderlayMTU > 0 {
+		expectedMTU := vxlanMTU(params.UnderlayMTU)
+		g.Expect(hostLegLink.Attrs().MTU).To(Equal(expectedMTU), "host veth MTU mismatch")
+	}
+
 	// Check IPv4 address if provided
 	if params.HostVeth.HostIPv4 != "" {
 		hasIP, err := interfaceHasIP(hostLegLink, params.HostVeth.HostIPv4)
@@ -438,6 +451,12 @@ func validateL2HostLeg(g Gomega, params L2VNIParams) {
 	g.Expect(err).NotTo(HaveOccurred(), "host side not found", vethNames.HostSide)
 
 	g.Expect(hostLegLink.Attrs().OperState).To(BeEquivalentTo(netlink.OperUp))
+
+	if params.UnderlayMTU > 0 {
+		expectedMTU := vxlanMTU(params.UnderlayMTU)
+		g.Expect(hostLegLink.Attrs().MTU).To(Equal(expectedMTU), "host veth MTU mismatch")
+	}
+
 	hasNoIP, err := interfaceHasNoIP(hostLegLink, netlink.FAMILY_V4)
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(hasNoIP).To(BeTrue(), "host leg does have ip")
@@ -549,6 +568,12 @@ func validateVNI(g Gomega, params VNIParams) {
 
 	err = checkVXLanConfigured(vxlan, bridge.Index, loopback.Attrs().Index, params)
 	g.Expect(err).NotTo(HaveOccurred())
+
+	if params.UnderlayMTU > 0 {
+		expectedMTU := vxlanMTU(params.UnderlayMTU)
+		g.Expect(bridge.Attrs().MTU).To(Equal(expectedMTU), "bridge MTU mismatch")
+		g.Expect(vxlan.Attrs().MTU).To(Equal(expectedMTU), "vxlan MTU mismatch")
+	}
 }
 
 func validateVethForVNI(g Gomega, params VNIParams) {
@@ -556,6 +581,11 @@ func validateVethForVNI(g Gomega, params VNIParams) {
 	peLegLink, err := netlink.LinkByName(vethNames.NamespaceSide)
 	g.Expect(err).NotTo(HaveOccurred(), "veth pe side not found", vethNames.NamespaceSide)
 	g.Expect(peLegLink.Attrs().OperState).To(BeEquivalentTo(netlink.OperUp))
+
+	if params.UnderlayMTU > 0 {
+		expectedMTU := vxlanMTU(params.UnderlayMTU)
+		g.Expect(peLegLink.Attrs().MTU).To(Equal(expectedMTU), "pe veth MTU mismatch")
+	}
 }
 
 func checkHostBridgedeleted(g Gomega, params L2VNIParams) {

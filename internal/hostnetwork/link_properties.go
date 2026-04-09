@@ -180,6 +180,20 @@ func moveInterfaceToNamespace(ctx context.Context, intf string, ns netns.NsHandl
 	return nil
 }
 
+// setLinkMTU sets the MTU on the given link. If mtu is 0, it's a no-op.
+func setLinkMTU(link netlink.Link, mtu int) error {
+	if mtu == 0 {
+		return nil
+	}
+	if link.Attrs().MTU == mtu {
+		return nil
+	}
+	if err := netlink.LinkSetMTU(link, mtu); err != nil {
+		return fmt.Errorf("failed to set MTU %d on %s: %w", mtu, link.Attrs().Name, err)
+	}
+	return nil
+}
+
 func intToInt32(val int) (int32, error) {
 	if val < math.MinInt32 || val > math.MaxInt32 {
 		return 0, fmt.Errorf("can't convert %d to int32", val)
