@@ -47,7 +47,6 @@ echo "OVS is ready"
 ovs-vsctl show
 
 umask 0
-shift # skip container image name
 for test_bin in "$@"; do
     echo "Running $test_bin..."
     if "$test_bin" -help 2>&1 | grep -q ginkgo; then

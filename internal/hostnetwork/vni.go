@@ -18,6 +18,9 @@ import (
 	"github.com/vishvananda/netns"
 )
 
+// VXLanOverhead is the number of bytes added by VXLan encapsulation.
+const VXLanOverhead = 50
+
 type VNIParams struct {
 	VRF           string `json:"vrf"`
 	TargetNS      string `json:"targetns"`
@@ -105,16 +108,32 @@ func SetupL3VNI(ctx context.Context, params L3VNIParams) error {
 	if errors.As(err, &netlink.LinkNotFoundError{}) {
 		return fmt.Errorf("SetupL3VNI: host veth %s does not exist, cannot setup L3 VNI", vethNames.HostSide)
 	}
+	if err != nil {
+		return fmt.Errorf("SetupL3VNI: failed to get host veth %s: %w", vethNames.HostSide, err)
+	}
 
 	err = assignIPsToInterface(hostVeth, params.HostVeth.HostIPv4, params.HostVeth.HostIPv6)
 	if err != nil {
 		return fmt.Errorf("failed to assign IPs to host veth: %w", err)
 	}
 
+	underlayMTU, err := findUnderlayMTU(ns)
+	if err != nil {
+		return fmt.Errorf("could not find underlay MTU: %w", err)
+	}
+
+	if err := setVethMTUForVXLAN(hostVeth, underlayMTU); err != nil {
+		return fmt.Errorf("SetupL3VNI: failed to set MTU on host veth %s: %w", vethNames.HostSide, err)
+	}
+
 	if err := netnamespace.In(ns, func() error {
 		peVeth, err := netlink.LinkByName(vethNames.NamespaceSide)
 		if err != nil {
 			return fmt.Errorf("could not find peer veth %s in namespace %s: %w", vethNames.NamespaceSide, params.TargetNS, err)
+		}
+
+		if err := setVethMTUForVXLAN(peVeth, underlayMTU); err != nil {
+			return fmt.Errorf("failed to set MTU on pe veth %s: %w", vethNames.NamespaceSide, err)
 		}
 
 		vrf, err := netlink.LinkByName(params.VRF)
@@ -136,6 +155,7 @@ func SetupL3VNI(ctx context.Context, params L3VNIParams) error {
 	}); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -174,6 +194,15 @@ func SetupL2VNI(ctx context.Context, params L2VNIParams) error {
 	}
 	slog.Info("SetupL2VNI: found host veth", "name", vethNames.HostSide, "index", hostVeth.Attrs().Index)
 
+	underlayMTU, err := findUnderlayMTU(ns)
+	if err != nil {
+		return fmt.Errorf("could not find underlay MTU: %w", err)
+	}
+
+	if err := setVethMTUForVXLAN(hostVeth, underlayMTU); err != nil {
+		return fmt.Errorf("SetupL2VNI: failed to set MTU on host veth %s: %w", vethNames.HostSide, err)
+	}
+
 	if params.HostMaster != nil {
 		if err := setupHostMaster(ctx, params, hostVeth); err != nil {
 			return err
@@ -181,34 +210,43 @@ func SetupL2VNI(ctx context.Context, params L2VNIParams) error {
 	}
 
 	if err := netnamespace.In(ns, func() error {
-		peVeth, err := netlink.LinkByName(vethNames.NamespaceSide)
-		if err != nil {
-			return fmt.Errorf("could not find peer veth %s in namespace %s: %w", vethNames.NamespaceSide, params.TargetNS, err)
-		}
-		name := BridgeName(params.VNI)
-		bridge, err := netlink.LinkByName(name)
-		if err != nil {
-			return fmt.Errorf("could not find bridge %s in namespace %s: %w", name, params.TargetNS, err)
-		}
-		if err := linkSetMaster(peVeth, bridge); err != nil {
-			return fmt.Errorf("failed to set bridge %s as master of pe veth %s: %w", name, peVeth.Attrs().Name, err)
-		}
-		if len(params.L2GatewayIPs) > 0 {
-			for _, ip := range params.L2GatewayIPs {
-				if err := assignIPToInterface(bridge, ip); err != nil {
-					return fmt.Errorf("failed to assign L2 gateway IP %s to bridge %s: %w", ip, name, err)
-				}
-			}
-
-			// setting up the same mac address for all the nodes for distributed gateway
-			if err := ensureBridgeFixedMacAddress(bridge, params.VNI); err != nil {
-				return fmt.Errorf("failed to set bridge mac address %s: %v", name, err)
-			}
-		}
-
-		return nil
+		return setupL2VNIRouterSide(params, vethNames.NamespaceSide, underlayMTU)
 	}); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func setupL2VNIRouterSide(params L2VNIParams, vethName string, underlayMTU int) error {
+	peVeth, err := netlink.LinkByName(vethName)
+	if err != nil {
+		return fmt.Errorf("could not find peer veth %s in namespace %s: %w", vethName, params.TargetNS, err)
+	}
+
+	if err := setVethMTUForVXLAN(peVeth, underlayMTU); err != nil {
+		return fmt.Errorf("failed to set MTU on pe veth %s: %w", vethName, err)
+	}
+
+	name := BridgeName(params.VNI)
+	bridge, err := netlink.LinkByName(name)
+	if err != nil {
+		return fmt.Errorf("could not find bridge %s in namespace %s: %w", name, params.TargetNS, err)
+	}
+	if err := linkSetMaster(peVeth, bridge); err != nil {
+		return fmt.Errorf("failed to set bridge %s as master of pe veth %s: %w", name, peVeth.Attrs().Name, err)
+	}
+	if len(params.L2GatewayIPs) > 0 {
+		for _, ip := range params.L2GatewayIPs {
+			if err := assignIPToInterface(bridge, ip); err != nil {
+				return fmt.Errorf("failed to assign L2 gateway IP %s to bridge %s: %w", ip, name, err)
+			}
+		}
+
+		// setting up the same mac address for all the nodes for distributed gateway
+		if err := ensureBridgeFixedMacAddress(bridge, params.VNI); err != nil {
+			return fmt.Errorf("failed to set bridge mac address %s: %v", name, err)
+		}
 	}
 	return nil
 }
@@ -622,6 +660,19 @@ func hostMaster(vni int, m HostMaster) (netlink.Link, error) {
 		return nil, fmt.Errorf("getHostMaster: failed to create host bridge %d: %w", vni, err)
 	}
 	return bridge, nil
+}
+
+// setVethMTUForVXLAN sets the MTU on a veth interface to account for VXLan overhead.
+// If the underlay MTU is not greater than VXLanOverhead, the MTU is left unchanged.
+func setVethMTUForVXLAN(link netlink.Link, underlayMTU int) error {
+	if underlayMTU == 0 {
+		slog.Debug("No underlay found")
+		return nil
+	}
+	if underlayMTU > VXLanOverhead {
+		return linkSetMTU(link, underlayMTU-VXLanOverhead)
+	}
+	return nil
 }
 
 // assignIPsToInterface assigns both IPv4 and IPv6 addresses to an interface.

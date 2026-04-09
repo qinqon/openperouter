@@ -249,6 +249,69 @@ var _ = Describe("L3 VNI configuration", func() {
 		_, err = netlink.LinkByName(vethNames.HostSide)
 		Expect(errors.As(err, &netlink.LinkNotFoundError{})).To(BeTrue(), "host veth should not exist when HostVeth is nil")
 	})
+
+	It("should set veth MTU to underlay MTU minus VXLan overhead when an underlay interface is configured", func() {
+		const underlayMTU = 9000
+		setupFakeUnderlay(testNS, "testunderlayl3", underlayMTU)
+
+		params := L3VNIParams{
+			VNIParams: VNIParams{
+				VRF:       "testred",
+				TargetNS:  testNSPath(),
+				VTEPIP:    "192.170.0.9/32",
+				VNI:       100,
+				VXLanPort: 4789,
+			},
+			HostVeth: &Veth{
+				HostIPv4: "192.168.9.1/32",
+				NSIPv4:   "192.168.9.0/32",
+			},
+		}
+
+		err := SetupL3VNI(context.Background(), params)
+		Expect(err).NotTo(HaveOccurred())
+
+		expectedMTU := underlayMTU - VXLanOverhead
+		Eventually(func(g Gomega) {
+			validateVethMTU(g, params.VNIParams, expectedMTU)
+			_ = netnamespace.In(testNS, func() error {
+				validateNSVethMTU(g, params.VNIParams, expectedMTU)
+				return nil
+			})
+		}, 30*time.Second, 1*time.Second).Should(Succeed())
+	})
+
+	It("should leave veth MTU at default when no underlay interface is configured", func() {
+		// No fake underlay is set up here, so findUnderlayMTU returns 0
+		// and setVethMTUForVXLAN must leave the veth MTU untouched. The
+		// host-side veth is not enslaved to any bridge in the L3 path
+		// (it is only attached to a VRF in the target ns), so the host
+		// leg's MTU reflects only what the code under test set.
+		params := L3VNIParams{
+			VNIParams: VNIParams{
+				VRF:       "testred",
+				TargetNS:  testNSPath(),
+				VTEPIP:    "192.170.0.9/32",
+				VNI:       100,
+				VXLanPort: 4789,
+			},
+			HostVeth: &Veth{
+				HostIPv4: "192.168.9.1/32",
+				NSIPv4:   "192.168.9.0/32",
+			},
+		}
+
+		err := SetupL3VNI(context.Background(), params)
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func(g Gomega) {
+			validateVethMTU(g, params.VNIParams, defaultVethMTU)
+			_ = netnamespace.In(testNS, func() error {
+				validateNSVethMTU(g, params.VNIParams, defaultVethMTU)
+				return nil
+			})
+		}, 30*time.Second, 1*time.Second).Should(Succeed())
+	})
 })
 
 var _ = Describe("L2 VNI configuration", func() {
@@ -444,6 +507,68 @@ var _ = Describe("L2 VNI configuration", func() {
 			},
 		}),
 	)
+
+	It("should set veth MTU to underlay MTU minus VXLan overhead when an underlay interface is configured", func() {
+		const underlayMTU = 9000
+		setupFakeUnderlay(testNS, "testunderlayl2", underlayMTU)
+
+		params := L2VNIParams{
+			VNIParams: VNIParams{
+				VRF:       "testred",
+				TargetNS:  testNSPath(),
+				VTEPIP:    "192.170.0.9/32",
+				VNI:       100,
+				VXLanPort: 4789,
+			},
+			L2GatewayIPs: []string{"192.168.1.0/24"},
+			HostMaster: &HostMaster{
+				Name: bridgeName,
+				Type: BridgeLinkType,
+			},
+		}
+
+		err := SetupL2VNI(context.Background(), params)
+		Expect(err).NotTo(HaveOccurred())
+
+		expectedMTU := underlayMTU - VXLanOverhead
+		Eventually(func(g Gomega) {
+			validateVethMTU(g, params.VNIParams, expectedMTU)
+			_ = netnamespace.In(testNS, func() error {
+				validateNSVethMTU(g, params.VNIParams, expectedMTU)
+				return nil
+			})
+		}, 30*time.Second, 1*time.Second).Should(Succeed())
+	})
+
+	It("should leave veth MTU at default when no underlay interface is configured", func() {
+		// No fake underlay is set up here, so findUnderlayMTU returns 0
+		// and setVethMTUForVXLAN must leave the veth MTU untouched.
+		// HostMaster is intentionally omitted so the host veth is not
+		// enslaved to a bridge — Linux bridges auto-clamp their MTU to
+		// the smallest member, which would couple this assertion to
+		// bridge default MTU rather than to the code under test.
+		params := L2VNIParams{
+			VNIParams: VNIParams{
+				VRF:       "testred",
+				TargetNS:  testNSPath(),
+				VTEPIP:    "192.170.0.9/32",
+				VNI:       100,
+				VXLanPort: 4789,
+			},
+			L2GatewayIPs: []string{"192.168.1.0/24"},
+		}
+
+		err := SetupL2VNI(context.Background(), params)
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func(g Gomega) {
+			validateVethMTU(g, params.VNIParams, defaultVethMTU)
+			_ = netnamespace.In(testNS, func() error {
+				validateNSVethMTU(g, params.VNIParams, defaultVethMTU)
+				return nil
+			})
+		}, 30*time.Second, 1*time.Second).Should(Succeed())
+	})
 })
 
 func validateL3HostLeg(g Gomega, params L3VNIParams) {
@@ -688,4 +813,50 @@ func validateBridgeMacAddress(g Gomega, bridge netlink.Link, vni int) {
 	actualMac := bridge.Attrs().HardwareAddr
 	g.Expect(actualMac).NotTo(BeNil(), "bridge should have a MAC address")
 	g.Expect(actualMac).To(Equal(expectedMac), "bridge MAC address should be %v for VNI %d", expectedMac, vni)
+}
+
+func validateVethMTU(g Gomega, params VNIParams, expectedMTU int) {
+	vethNames := vethNamesFromVNI(params.VNI)
+	hostLeg, err := netlink.LinkByName(vethNames.HostSide)
+	g.Expect(err).NotTo(HaveOccurred(), "host veth not found %q", vethNames.HostSide)
+	g.Expect(hostLeg.Attrs().MTU).To(Equal(expectedMTU),
+		"host veth MTU should be %d, got %d", expectedMTU, hostLeg.Attrs().MTU)
+}
+
+func validateNSVethMTU(g Gomega, params VNIParams, expectedMTU int) {
+	vethNames := vethNamesFromVNI(params.VNI)
+	peLeg, err := netlink.LinkByName(vethNames.NamespaceSide)
+	g.Expect(err).NotTo(HaveOccurred(), "pe veth not found %q", vethNames.NamespaceSide)
+	g.Expect(peLeg.Attrs().MTU).To(Equal(expectedMTU),
+		"pe veth MTU should be %d, got %d", expectedMTU, peLeg.Attrs().MTU)
+}
+
+// defaultVethMTU is the MTU veth pairs receive when no explicit MTU is set.
+const defaultVethMTU = 1500
+
+// setupFakeUnderlay creates a dummy interface inside the given namespace with
+// the underlay special address and a configurable MTU, so that findUnderlayMTU
+// can locate it. It is intended for unit tests exercising the MTU propagation
+// behavior of SetupL2VNI / SetupL3VNI.
+func setupFakeUnderlay(ns netns.NsHandle, name string, mtu int) {
+	err := netnamespace.In(ns, func() error {
+		dummy := &netlink.Dummy{
+			LinkAttrs: netlink.LinkAttrs{
+				Name: name,
+				MTU:  mtu,
+			},
+		}
+		if err := netlink.LinkAdd(dummy); err != nil {
+			return fmt.Errorf("failed to add fake underlay dummy %s: %w", name, err)
+		}
+		link, err := netlink.LinkByName(name)
+		if err != nil {
+			return fmt.Errorf("failed to get fake underlay dummy %s: %w", name, err)
+		}
+		if err := assignIPToInterface(link, underlayInterfaceSpecialAddr); err != nil {
+			return fmt.Errorf("failed to assign underlay special addr to %s: %w", name, err)
+		}
+		return nil
+	})
+	Expect(err).NotTo(HaveOccurred(), "failed to set up fake underlay")
 }

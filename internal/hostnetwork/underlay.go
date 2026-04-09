@@ -133,6 +133,7 @@ func moveUnderlayInterface(ctx context.Context, underlayInterface string, ns net
 		if err := netlink.LinkSetUp(underlay); err != nil {
 			return fmt.Errorf("could not set link up for VRF %s: %v", underlay.Attrs().Name, err)
 		}
+
 		return nil
 	}); err != nil {
 		return err
@@ -163,33 +164,66 @@ func HasUnderlayInterface(namespace string) (bool, error) {
 // findInterfaceWithIP retrieves the interface assigned to the given ip
 // in the given network ns.
 func findInterfaceWithIP(ns netns.NsHandle, ip string) (string, error) {
-	res := ""
+	linkName := ""
 	err := netnamespace.In(ns, func() error {
-		links, err := netlink.LinkList()
+		l, err := findLinkWithIP(ip)
 		if err != nil {
-			return fmt.Errorf("failed to list links: %w", err)
+			return err
 		}
-		for _, l := range links {
-			addr, _ := netlink.AddrList(l, netlink.FAMILY_ALL)
-			slog.Debug("find underlay", "checking link", l.Attrs().Name, "addresses", addr)
-			hasIP, err := interfaceHasIP(l, ip)
-			if err != nil {
-				return err
-			}
-			if hasIP {
-				res = l.Attrs().Name
-				return nil
-			}
+		if l == nil {
+			return nil
 		}
+		linkName = l.Attrs().Name
 		return nil
 	})
 	if err != nil {
 		return "", err
 	}
-	if res != "" {
-		slog.Debug("returning found has ip", "res", res)
-		return res, nil
+	return linkName, nil
+}
+
+// findUnderlayMTU retrieve the underlay interface MTU, it finds the underlay
+// interface by looking with a link with the underlay special IP
+func findUnderlayMTU(ns netns.NsHandle) (int, error) {
+	underlayMTU := 0
+	err := netnamespace.In(ns, func() error {
+		underlayLink, err := findLinkWithIP(underlayInterfaceSpecialAddr)
+		if err != nil {
+			return err
+		}
+		if underlayLink == nil {
+			slog.Info("no underlay link found when finding MTU", "underlay address", underlayInterfaceSpecialAddr)
+
+			return nil
+		}
+		underlayMTU = underlayLink.Attrs().MTU
+		return nil
+
+	})
+	if err != nil {
+		return 0, err
+	}
+	return underlayMTU, nil
+}
+
+// findLinkWithIP retrieves the link assigned to the given ip.
+func findLinkWithIP(ip string) (netlink.Link, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list links: %w", err)
+	}
+	for _, l := range links {
+		addr, _ := netlink.AddrList(l, netlink.FAMILY_ALL)
+		slog.Debug("find underlay", "checking link", l.Attrs().Name, "addresses", addr)
+		hasIP, err := interfaceHasIP(l, ip)
+		if err != nil {
+			return nil, err
+		}
+		if hasIP {
+			slog.Debug("returning found has ip", "res", l)
+			return l, nil
+		}
 	}
 	slog.Debug("returning not found")
-	return "", nil
+	return nil, nil
 }

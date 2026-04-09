@@ -153,10 +153,11 @@ When you create or update VNI configurations, OpenPERouter automatically:
 
 1. **Creates Network Interfaces**: Sets up VXLAN interface and Linux VRF named after the VNI
 2. **Establishes Connectivity**: Creates veth pair and moves one end to the router's namespace
-3. **Assigns IP Addresses**: Allocates IPs from the `localcidr` range:
+3. **Adjusts Veth MTU**: Sets the underlay MTU on both veth legs to account for VXLan encapsulation overhead
+4. **Assigns IP Addresses**: Allocates IPs from the `localcidr` range:
    - Router side: First IP in the CIDR (e.g., `192.169.11.1`)
    - Host side: Each node gets a free IP in the CIDR, starting from the second (e.g., `192.169.11.15`)
-4. **Creates BGP Session**: Opens BGP session between router and host using the specified ASNs
+5. **Creates BGP Session**: Opens BGP session between router and host using the specified ASNs
 
 ## L2VNI Configuration
 
@@ -198,9 +199,10 @@ When you create or update VNI configurations, OpenPERouter automatically:
 
 1. **Creates Network Interfaces**: Sets up VXLAN interface and Linux VRF named after the VNI
 2. **Establishes Connectivity**: Creates veth pair and moves one end to the router's namespace
-3. **Enslaves the veth**: the veth is connected to the bridge corresponding to the l2 domain
-4. **Optionally creates a bridge on the host**: if hostmaster.autocreate is set to `true`
-5. **Optionally connects the host veth to the bridge on the host**: if hostmaster.autocreate is set to `true` or name
+3. **Adjusts Veth MTU**: Sets the MTU on both veth legs to account for VXLan encapsulation overhead and underlay
+4. **Enslaves the veth**: the veth is connected to the bridge corresponding to the l2 domain
+5. **Optionally creates a bridge on the host**: if hostmaster.autocreate is set to `true`
+6. **Optionally connects the host veth to the bridge on the host**: if hostmaster.autocreate is set to `true` or name
 is set
 
 ## Per-Node Configuration
