@@ -75,7 +75,43 @@ When `vtepInterface` is set, OpenPERouter uses the specified interface's IP as t
 | `evpn.vtepInterface` | string | Name of an existing interface to use as VTEP source. Mutually exclusive with `vtepcidr`. | Yes (one of `vtepcidr` / `vtepInterface`) |
 | `nics` | array | List of network interface names to move to router namespace | Yes |
 | `neighbors` | array | List of BGP neighbors to peer with | Yes |
+| `gracefulRestart` | object | BGP Graceful Restart configuration (see below) | No |
 | `nodeSelector` | object | Label selector to target specific nodes (applies to all nodes if omitted) | No |
+
+## BGP Graceful Restart
+
+BGP Graceful Restart allows the router to preserve forwarding state across restarts, so that peers keep stale routes active while the router recovers. This is essential for achieving zero data plane disruption during router pod restarts when using the [persistent named network namespace]({{< ref "/docs/concepts/resiliency" >}}).
+
+To enable Graceful Restart, add the `gracefulRestart` field to the Underlay resource:
+
+```yaml
+apiVersion: openpe.openperouter.github.io/v1alpha1
+kind: Underlay
+metadata:
+  name: underlay
+  namespace: openperouter-system
+spec:
+  asn: 64514
+  evpn:
+    vtepcidr: 100.65.0.0/24
+  nics:
+    - toswitch
+  neighbors:
+    - asn: 64512
+      address: 192.168.11.2
+  gracefulRestart:
+    restartTime: 120
+    stalePathTime: 360
+```
+
+### Graceful Restart Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `gracefulRestart.restartTime` | integer (1-4095) | 120 | Time in seconds that the restarting router requests its peers to preserve routes. Peers wait this long before removing stale routes. |
+| `gracefulRestart.stalePathTime` | integer (1-4095) | 360 | Time in seconds that stale paths from a restarting peer are retained locally. |
+
+When `gracefulRestart` is omitted, Graceful Restart is not enabled and peers will immediately withdraw routes when the router restarts.
 
 ## L3 VNI Configuration
 
