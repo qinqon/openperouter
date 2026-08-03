@@ -43,7 +43,6 @@ router bgp 64514
     neighbor 192.168.12.0/24 activate
     neighbor 192.168.12.0/24 allowas-in
     advertise-all-vni
-    advertise-svi-ip
   exit-address-family
 exit
 !

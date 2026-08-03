@@ -58,7 +58,6 @@ router bgp 64514
     neighbor fd00:10::/64 route-reflector-client
     neighbor 192.168.10.4 activate
     advertise-all-vni
-    advertise-svi-ip
   exit-address-family
 exit
 !

@@ -32,7 +32,6 @@ router bgp 64512
     neighbor eth1 activate
     neighbor eth1 allowas-in
     advertise-all-vni
-    advertise-svi-ip
   exit-address-family
 exit
 !
