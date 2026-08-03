@@ -98,6 +98,10 @@ ASAN build would need the router image moved to a glibc base.
 
 ## Notes
 
+* `debug zebra kernel` is deliberately kept in `internal/frr/templates/frr.tmpl`.
+  Dropping it makes the abort go away, but it also hides the corruption: the
+  crash has to keep firing for a core to be worth dissecting.
+
 * `concurrency.cancel-in-progress` is disabled on this branch so that a soak
   run is not killed by the next push.
 * The `manifests` lane runs zebra without `-K 60`, the `helm` and `operator`
