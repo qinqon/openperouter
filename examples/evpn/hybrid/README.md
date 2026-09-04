@@ -25,7 +25,7 @@ examples/evpn/hybrid/
 ├── gcp/                      # GCP OpenShift cluster configurations
 │   ├── network.env           # Network configuration (subnets, IPs, ASNs)
 │   ├── setup.sh              # GCP infrastructure (VPN, routes, firewall, alias IPs)
-│   ├── underlay.sh           # Generate per-node Underlay CRDs (ipvlan L3 CNIDevice, BGP mesh)
+│   ├── underlay.sh           # Generate the Underlay CRDs (ipvlan L3 CNIDevice, route reflector + clients)
 │   ├── vni.yaml              # L2VNI (110) + L3VNI (100) configuration
 │   ├── workload.yaml         # VM workload on EVPN network
 │   ├── migration-l2vni.yaml  # Migration L2VNI (666) for CCLM
@@ -59,7 +59,7 @@ examples/evpn/hybrid/
 │  └──────────────┬─────────────────────────────┘         │      │  │.<nodeidx> │    │.<nodeidx> │    │
 │                 │                                       │      │  └─────┬─────┘    └─────┬─────┘    │
 │            ┌────┴────┐                                  │      │        └────────┬───────┘          │
-│            │  spine  │                                  │ VPN  │            BGP Mesh                │
+│            │  spine  │                                  │ VPN  │      iBGP, worker-1 is the RR      │
 │            │ (BGP RR)│                                  │Tunnel│                                    │
 │            └────┬────┴────────┐                         │◄────►│  L2VNI 110: 192.170.1.0/24         │
 │                 │             │                         │      │  L3VNI 100: VRF red                │
@@ -165,7 +165,7 @@ openperouter:
 
 The underlay interface of each router is not attached through Multus: it is
 provisioned by OpenPERouter itself from the CNI configuration embedded in the
-Underlay (`CNIDevice`), see [Configure Underlay BGP Mesh](#configure-underlay-bgp-mesh).
+Underlay (`CNIDevice`), see [Configure the Underlay](#configure-the-underlay).
 No Multus, NetworkAttachmentDefinition nor Whereabouts is needed on the router
 side.
 
@@ -291,14 +291,14 @@ The `virt-synchronization-controller` pods need to be reachable from the source 
 
 2. **Node-scoped Underlays**: Underlays carry a `nodeSelector`, so control plane nodes could get their own Underlay with an ipvlan interface on their NIC and join the overlay, letting the controller stay where it is and keep the default priority class behavior. Not exercised by this PoC.
 
-#### Configure Underlay BGP Mesh
+#### Configure the Underlay
 
 ```bash
 ./gcp/underlay.sh
 ```
 
-This generates per-node Underlay CRDs with mesh BGP topology. Each router gets
-an `ipvlan` interface in L3 mode on top of `br-ex`, provisioned by OpenPERouter
+This generates the Underlay CRDs of the GCP cluster. Each router gets an
+`ipvlan` interface in L3 mode on top of `br-ex`, provisioned by OpenPERouter
 through the embedded CNI configuration (`CNIDevice`): GCP rejects traffic
 sourced from MAC addresses other than the one of the VM NIC, which rules out
 `macvlan`, and ipvlan L3 fits the routed nature of the VPC.
@@ -311,17 +311,24 @@ VTEP would never receive the return VXLAN traffic. OpenPERouter hands the
 derived address to the CNI chain through the `ips` capability, which is why the
 ipvlan plugin declares it and uses `static` IPAM.
 
+All the GCP nodes share ASN 65001 and the first worker acts as a BGP route
+reflector (RFC 4456) for the others, so no full mesh is needed between the
+workers: the reflector accepts dynamic iBGP sessions over the VTEP range
+(`listenRange`) and reflects both `ipv4unicast` (VTEP reachability) and `evpn`
+(type-2/type-3) routes between its clients, which only peer with it. Every node
+additionally keeps its own eBGP multihop session with the on-prem `leafgcp`, so
+on-prem connectivity does not depend on the reflector. The reflector is a
+regular data plane node too (it has a tunnel endpoint and hosts VNIs).
+
 ```yaml
+# Route reflector: the first worker
 apiVersion: network.openperouter.io/v1alpha1
 kind: Underlay
 metadata:
-  name: worker-c-xxxxx
+  name: route-reflector
   namespace: openperouter-system
 spec:
   asn: 65001
-  nodeSelector:
-    matchLabels:
-      kubernetes.io/hostname: worker-c-xxxxx.c.project.internal
   tunnelEndpoint:
     interfaceName: net1
     cidrs:
@@ -345,11 +352,49 @@ spec:
                 routes:
                   - dst: 10.250.1.0/24    # on-prem leafgcp, through the VPN
                   - dst: 192.168.11.0/24  # the other GCP workers
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: worker-c-aaaaa.c.project.internal
+  routeReflector:
+    clusterID: 192.0.2.1
   neighbors:
-    - asn: 65002
-      address: 192.168.11.1     # Peer with other GCP worker (its VTEP)
+    - type: Internal
+      listenRange: 192.168.11.0/24
+      addressFamilies:
+        - type: ipv4unicast
+          properties:
+            - type: routeReflectorClient
+        - type: evpn
+          properties:
+            - type: routeReflectorClient
     - asn: 64515
       address: 10.250.1.3       # Peer with on-prem leafgcp
+      properties:
+        - type: ebgpMultiHop
+          ebgpMultiHop:
+            ttl: 10
+---
+# Clients: the remaining workers, same ipvlan/tunnelEndpoint/interfaces as above
+apiVersion: network.openperouter.io/v1alpha1
+kind: Underlay
+metadata:
+  name: route-reflector-clients
+  namespace: openperouter-system
+spec:
+  asn: 65001
+  tunnelEndpoint: ...
+  interfaces: ...
+  nodeSelector:
+    matchExpressions:
+      - key: kubernetes.io/hostname
+        operator: In
+        values:
+          - worker-c-bbbbb.c.project.internal
+  neighbors:
+    - type: Internal
+      address: 192.168.11.3     # the reflector's VTEP
+    - asn: 64515
+      address: 10.250.1.3
       properties:
         - type: ebgpMultiHop
           ebgpMultiHop:
@@ -866,7 +911,7 @@ PING 192.170.1.1 (192.170.1.1) 56(84) bytes of data.
 
 3. **GCP VTEP Reachability**: The GCP Cloud Router advertises 192.168.11.0/24 to on-prem via the BGP session with leafgcp. No static routes are needed on leafgcp - it learns the route dynamically and re-advertises it to spine
 
-4. **BGP Topology**: On-prem uses spine as central eBGP hub (different ASNs per leaf); GCP uses eBGP mesh (different ASN per worker)
+4. **BGP Topology**: On-prem uses spine as central eBGP hub (different ASNs per leaf); GCP uses a single ASN with one worker acting as iBGP route reflector for the others, plus eBGP multihop from every worker to leafgcp
 
    **On-prem spine** ([`clab/hybrid/spine/frr.conf`](../../clab/hybrid/spine/frr.conf)):
    ```
@@ -894,14 +939,33 @@ PING 192.170.1.1 (192.170.1.1) 56(84) bytes of data.
 
    **GCP workers** (generated by [`gcp/underlay.sh`](gcp/underlay.sh)):
    ```yaml
-   # Each worker gets a unique ASN and peers with all other workers + leafgcp
+   # Route reflector (first worker)
    spec:
-     asn: 65001  # worker-1 (65002 for worker-2, etc.)
+     asn: 65001
+     routeReflector:
+       clusterID: 192.0.2.1
      neighbors:
-       - asn: 65002
-         address: 192.168.11.1     # Peer with other GCP workers (their VTEP)
+       - type: Internal
+         listenRange: 192.168.11.0/24   # dynamic iBGP sessions from the clients
+         addressFamilies:
+           - type: ipv4unicast
+             properties: [{type: routeReflectorClient}]
+           - type: evpn
+             properties: [{type: routeReflectorClient}]
        - asn: 64515
-         address: 10.250.1.3       # Peer with on-prem leafgcp
+         address: 10.250.1.3            # Peer with on-prem leafgcp
+         properties:
+           - type: ebgpMultiHop
+             ebgpMultiHop:
+               ttl: 10
+   # Clients (other workers)
+   spec:
+     asn: 65001
+     neighbors:
+       - type: Internal
+         address: 192.168.11.3          # the reflector's VTEP
+       - asn: 64515
+         address: 10.250.1.3
          properties:
            - type: ebgpMultiHop
              ebgpMultiHop:
@@ -1040,7 +1104,7 @@ VNI: 110 (known to the kernel)
     64514:110
 ```
 
-GCP routers may use different RTs (e.g., 65001:110, 65002:110). Ensure all peers import each other's RTs:
+GCP routers share ASN 65001, so their RTs are 65001:110. Ensure all peers import each other's RTs:
 
 ```bash
 # Add cross-imports if needed
@@ -1048,8 +1112,7 @@ vtysh -c "configure terminal" \
       -c "router bgp 64515" \
       -c "address-family l2vpn evpn" \
       -c "vni 110" \
-      -c "route-target import 65001:110" \
-      -c "route-target import 65002:110"
+      -c "route-target import 65001:110"
 ```
 
 ### VXLAN Traffic Not Flowing
@@ -1118,11 +1181,11 @@ docker exec clab-kind-leafgcp vtysh -c "show bgp l2vpn evpn route type 2" | grep
 
 This section outlines the limitations of the current PoC and potential improvements to make it production-ready.
 
-### BGP Topology
+### Route Reflector Redundancy
 
-The current PoC uses a full mesh BGP topology for the underlay on GCP. This does not scale well as the number of nodes increases.
+The GCP underlay uses one worker as iBGP route reflector for the others, which keeps the number of sessions at O(n) instead of the O(n²) of a full mesh. A single reflector is however a single point of failure for the intra cluster EVPN control plane (on-prem connectivity is not affected, every worker peers with leafgcp directly).
 
-**Improvement**: Replace the underlay mesh with a Route Reflector topology, reducing BGP sessions from O(n²) to O(n). OpenPERouter now supports acting as a route reflector through `spec.routeReflector` and neighbors with `listenRange` and the `routeReflectorClient` property, see the [Route Reflector documentation](https://openperouter.github.io/openperouter/docs/configuration/route-reflector/). Not exercised yet by this PoC.
+**Improvement**: Run two reflectors sharing the same `clusterID` and have the clients peer with both.
 
 ### GCP IP Alias Automation
 
