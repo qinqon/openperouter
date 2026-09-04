@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -79,6 +80,10 @@ func APItoHostConfig(nodeIndex int, targetNS string, apiConfig APIConfigData) (H
 	}
 
 	if err := validateOverlayPrerequisitesForHost(apiConfig, underlayConfigTunnelEndpoint); err != nil {
+		return HostConfigData{}, err
+	}
+
+	if err := placeTunnelEndpointOnInterface(underlayInterfaces, underlayConfigTunnelEndpoint); err != nil {
 		return HostConfigData{}, err
 	}
 
@@ -199,7 +204,9 @@ func validateOverlayPrerequisitesForHost(config APIConfigData, tunnelEndpoint ho
 }
 
 func tunnelEndpointToHost(tunnelEndpointConfig *v1alpha1.TunnelEndpointConfig, nodeIndex int) (hostnetwork.UnderlayTunnelEndpointParams, error) {
-	tunnelEndpoint := hostnetwork.UnderlayTunnelEndpointParams{}
+	tunnelEndpoint := hostnetwork.UnderlayTunnelEndpointParams{
+		InterfaceName: ptr.Deref(tunnelEndpointConfig.InterfaceName, ""),
+	}
 	for _, cidr := range tunnelEndpointConfig.CIDRs {
 		af := ipfamily.ForCIDRString(cidr)
 		if af == ipfamily.Unknown {
@@ -225,6 +232,42 @@ func tunnelEndpointToHost(tunnelEndpointConfig *v1alpha1.TunnelEndpointConfig, n
 				tunnelEndpointConfig.CIDRs)
 	}
 	return tunnelEndpoint, nil
+}
+
+// placeTunnelEndpointOnInterface hands the derived tunnel endpoint addresses
+// to the CNI interface selected to carry them through the ips capability
+// argument, so the static IPAM plugin of the chain assigns them at ADD time.
+// Underlays whose endpoint lives on the loopback are left untouched.
+func placeTunnelEndpointOnInterface(interfaces []hostnetwork.UnderlayInterface,
+	tunnelEndpoint hostnetwork.UnderlayTunnelEndpointParams) error {
+	if tunnelEndpoint.InterfaceName == "" {
+		return nil
+	}
+	for i := range interfaces {
+		iface := &interfaces[i]
+		if iface.InterfaceName != tunnelEndpoint.InterfaceName {
+			continue
+		}
+		if iface.Kind != hostnetwork.UnderlayInterfaceCNIDev || iface.CNI == nil {
+			return fmt.Errorf("tunnel endpoint interface %s is not a CNIDevice", tunnelEndpoint.InterfaceName)
+		}
+		capabilityArgs := maps.Clone(iface.CNI.CapabilityArgs)
+		if capabilityArgs == nil {
+			capabilityArgs = map[string]any{}
+		}
+		// libcni decodes capability args from JSON, so the value has to
+		// match the shape of a decoded JSON array to compare equal to the
+		// cached attachment.
+		ips := make([]any, 0, 2)
+		for _, address := range tunnelEndpoint.Addresses() {
+			ips = append(ips, address)
+		}
+		capabilityArgs[cniinvoker.IPsCapability] = ips
+		iface.CNI.CapabilityArgs = capabilityArgs
+		return nil
+	}
+	return fmt.Errorf("tunnel endpoint interface %s not found among the underlay interfaces",
+		tunnelEndpoint.InterfaceName)
 }
 
 func l3vnisToHost(
@@ -268,6 +311,7 @@ func l3vniToHost(
 			VRF:            l3vni.Spec.VRF,
 			TargetNS:       targetNS,
 			VTEPIP:         vtepIP,
+			VTEPDevice:     tunnelEndpoint.InterfaceName,
 			VNI:            l3vni.Spec.VNI,
 			VXLanPort:      vxlanPort(l3vni.Spec.VXLanPort),
 			TunnelOverhead: tunnelOverhead,
@@ -336,6 +380,7 @@ func l2vniToHost(
 		VNIParams: hostnetwork.VNIParams{
 			TargetNS:       targetNS,
 			VTEPIP:         vtepIP,
+			VTEPDevice:     tunnelEndpoint.InterfaceName,
 			VNI:            l2vni.Spec.VNI,
 			VXLanPort:      vxlanPort(l2vni.Spec.VXLanPort),
 			TunnelOverhead: tunnelOverhead,

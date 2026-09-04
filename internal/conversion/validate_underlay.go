@@ -87,6 +87,9 @@ func validateUnderlay(underlay v1alpha1.Underlay) error {
 		if err := validateUnderlayTunnelEndpoint(&underlay); err != nil {
 			return err
 		}
+		if err := validateTunnelEndpointInterface(&underlay); err != nil {
+			return fmt.Errorf("underlay %s: %w", underlay.Name, err)
+		}
 	}
 
 	srv6Config := underlay.Spec.SRV6
