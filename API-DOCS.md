@@ -1007,7 +1007,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `cidrs` _string array_ | cidrs is a list of CIDRs to be used to assign IPs to the local tunnel endpoint on<br />each node. IPs derived from these CIDRs will be assigned to the local loopback.<br />At least one IPv4 or IPv6 CIDR is required. At most one of each family may be specified. |  | MaxItems: 2 <br />MinItems: 1 <br />Required: \{\} <br /> |
+| `cidrs` _string array_ | cidrs is a list of CIDRs to be used to assign IPs to the local tunnel endpoint on<br />each node. IPs derived from these CIDRs will be assigned to the local loopback,<br />or to the interface named by interfaceName when set.<br />At least one IPv4 or IPv6 CIDR is required. At most one of each family may be specified. |  | MaxItems: 2 <br />MinItems: 1 <br />Required: \{\} <br /> |
+| `interfaceName` _string_ | interfaceName optionally names the CNIDevice interface (its effective<br />cniDevice.interfaceName) on which the derived tunnel endpoint addresses<br />are placed, and which the VXLAN devices use as their source device.<br />When omitted, the addresses are placed on the router loopback.<br />Meant for uplinks that cannot deliver traffic to a loopback address,<br />such as an ipvlan interface in L3 mode: the referenced interface must<br />be the only underlay interface and its CNI chain must be a single<br />ipvlan plugin in l3 mode with static IPAM declaring the ips<br />capability, through which the derived addresses are applied.<br />Immutable once set: to change it, delete and recreate the Underlay. |  | MaxLength: 15 <br />MinLength: 1 <br />Pattern: `^[a-zA-Z][a-zA-Z0-9._-]*$` <br />Optional: \{\} <br /> |
 
 
 #### Underlay

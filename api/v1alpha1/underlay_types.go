@@ -250,9 +250,11 @@ type GracefulRestartConfig struct {
 }
 
 // TunnelEndpointConfig contains tunnel endpoint configuration for the underlay.
+// +kubebuilder:validation:XValidation:rule="has(self.interfaceName) == has(oldSelf.interfaceName) && (!has(self.interfaceName) || self.interfaceName == oldSelf.interfaceName)",message="tunnelEndpoint.interfaceName is immutable, delete and recreate the Underlay to change it"
 type TunnelEndpointConfig struct {
 	// cidrs is a list of CIDRs to be used to assign IPs to the local tunnel endpoint on
-	// each node. IPs derived from these CIDRs will be assigned to the local loopback.
+	// each node. IPs derived from these CIDRs will be assigned to the local loopback,
+	// or to the interface named by interfaceName when set.
 	// At least one IPv4 or IPv6 CIDR is required. At most one of each family may be specified.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=2
@@ -262,6 +264,22 @@ type TunnelEndpointConfig struct {
 	// +listType=atomic
 	// +required
 	CIDRs []string `json:"cidrs,omitempty"`
+
+	// interfaceName optionally names the CNIDevice interface (its effective
+	// cniDevice.interfaceName) on which the derived tunnel endpoint addresses
+	// are placed, and which the VXLAN devices use as their source device.
+	// When omitted, the addresses are placed on the router loopback.
+	// Meant for uplinks that cannot deliver traffic to a loopback address,
+	// such as an ipvlan interface in L3 mode: the referenced interface must
+	// be the only underlay interface and its CNI chain must be a single
+	// ipvlan plugin in l3 mode with static IPAM declaring the ips
+	// capability, through which the derived addresses are applied.
+	// Immutable once set: to change it, delete and recreate the Underlay.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z][a-zA-Z0-9._-]*$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=15
+	// +optional
+	InterfaceName *string `json:"interfaceName,omitempty"`
 }
 
 // ISISConfig contains ISIS configuration for the underlay.
