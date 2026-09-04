@@ -10,7 +10,7 @@ toc: true
 
 ## Underlay Configuration
 
-In addition to the configuration described in the [underlay configuration section]({{< ref "configuration/#underlay-configuration" >}}), the VTEP (Virtual Tunnel End Point) source must be configured via the `evpn.vtepCIDR` field.
+In addition to the configuration described in the [underlay configuration section]({{< ref "configuration/#underlay-configuration" >}}), the VTEP (Virtual Tunnel End Point) source must be configured via the `tunnelEndpoint.cidrs` field.
 
 ```yaml
 apiVersion: network.openperouter.io/v1alpha1
@@ -39,7 +39,63 @@ The `tunnelEndpoint.cidrs` field defines the IP range used for VTEP addresses. O
 - Node 3: `100.65.0.3`
 - etc.
 
-A loopback interface is created inside the router namespace with the allocated IP, and OpenPERouter advertises the VTEP IP to the fabric over the BGP underlay session.
+By default the allocated IP is assigned to the loopback interface inside the router namespace, and OpenPERouter advertises the VTEP IP to the fabric over the BGP underlay session. The loopback decouples the VTEP from any single uplink: with multiple underlay interfaces, the tunnels survive the loss of one of them.
+
+#### VTEP on a CNI-Provisioned Interface
+
+Some uplinks cannot deliver traffic to an address assigned to the loopback. An `ipvlan` interface in L3 mode, the interface of choice in cloud networks that reject additional source MAC addresses, only delivers incoming packets to addresses assigned to the ipvlan interface itself, so a loopback VTEP never receives the return VXLAN traffic.
+
+For these cases the `tunnelEndpoint.interfaceName` field places the allocated VTEP IP on a [CNI-provisioned interface]({{< ref "configuration/#cni-provisioned-interfaces" >}}) instead of the loopback, and the VXLAN devices use that interface as their source device:
+
+```yaml
+apiVersion: network.openperouter.io/v1alpha1
+kind: Underlay
+metadata:
+  name: underlay
+  namespace: openperouter-system
+spec:
+  asn: 65001
+  tunnelEndpoint:
+    interfaceName: net1
+    cidrs:
+    - 192.168.11.0/24
+  interfaces:
+    - type: CNIDevice
+      cniDevice:
+        type: RawConfig
+        interfaceName: net1
+        rawConfig:
+          cniVersion: "1.0.0"
+          name: ipvlan-underlay
+          plugins:
+            - type: ipvlan
+              master: eth0
+              mode: l3
+              capabilities:
+                ips: true
+              ipam:
+                type: static
+                routes:
+                  - dst: 10.250.1.0/24
+  neighbors:
+    - asn: 64515
+      address: 10.250.1.3
+      properties:
+        - type: ebgpMultiHop
+          ebgpMultiHop:
+            ttl: 10
+```
+
+`cidrs` remains the source of the VTEP IP: OpenPERouter derives it from the node index as usual, and hands it to the CNI chain through the `ips` capability argument so that the `static` IPAM plugin assigns it to the interface at CNI ADD time. Because of this, the referenced CNI configuration must:
+
+- be the only entry of `interfaces`, since a VTEP bound to an uplink gives up the loopback's multi-uplink redundancy;
+- be a single `ipvlan` plugin in `l3` mode with `static` IPAM declaring `capabilities: {ips: true}`;
+- not set `ipam.addresses` nor `runtimeConfig.ips`, as OpenPERouter owns the addresses of that interface;
+- not set `disableCheck`, since CNI CHECK is what detects drift.
+
+`interfaceName` is immutable: moving the VTEP between the loopback and an interface requires deleting and recreating the Underlay. Changing `cidrs` re-provisions the interface with the new address after tearing down the VNIs bound to it. The field is not supported together with SRv6.
+
+The surrounding network must route the derived address to the node (e.g. a GCP alias IP range, an AWS secondary private IP, an Azure secondary IP configuration or an OpenStack allowed address pair); OpenPERouter does not configure the cloud provider.
 
 #### IPv6 and Dual-Stack VTEP
 
@@ -59,7 +115,8 @@ When both IPv4 and IPv6 CIDRs are specified, individual VNIs can select which ad
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `asn` | integer | Local ASN for BGP sessions | Yes |
-| `evpn.vtepCIDR` | string | CIDR block for VTEP IP allocation | Yes |
+| `tunnelEndpoint.cidrs` | array | CIDR blocks for VTEP IP allocation, at most one per address family | Yes |
+| `tunnelEndpoint.interfaceName` | string | CNI-provisioned interface carrying the VTEP IP instead of the loopback. See [VTEP on a CNI-Provisioned Interface](#vtep-on-a-cni-provisioned-interface) | No |
 | `interfaces` | array | List of underlay interfaces to use for connectivity. Each entry is a discriminated union; the `NetworkDevice` type moves an existing host network device into the router namespace, while the `CNIDevice` type provisions an interface inside the router namespace via a CNI plugin. All entries must use the same type: mixing `NetworkDevice` and `CNIDevice` interfaces is rejected | Yes |
 | `neighbors` | array | List of BGP neighbors to peer with | Yes |
 | `nodeSelector` | object | Label selector to target specific nodes (applies to all nodes if omitted) | No |

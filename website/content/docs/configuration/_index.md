@@ -282,6 +282,11 @@ Key behaviors to be aware of:
   `mac`, `bandwidth`) to plugins that declare the corresponding
   `capabilities` in their config; undeclared keys are ignored. Like
   `rawConfig`, it is immutable once the Underlay is created.
+- **The VTEP can live on the CNI interface**: uplinks such as `ipvlan` in
+  L3 mode cannot deliver traffic to a loopback address. Setting
+  `tunnelEndpoint.interfaceName` to the CNI interface places the derived
+  tunnel endpoint address on it instead. See
+  [VTEP on a CNI-Provisioned Interface]({{< ref "evpn/#vtep-on-a-cni-provisioned-interface" >}}).
 - **Drift is detected and repaired on the next reconcile**: the controller
   runs a CNI CHECK against the cached attachment before trusting it. If the
   interface was removed or misconfigured outside of OpenPERouter, the next

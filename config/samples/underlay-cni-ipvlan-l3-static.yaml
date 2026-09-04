@@ -1,0 +1,44 @@
+apiVersion: network.openperouter.io/v1alpha1
+kind: Underlay
+metadata:
+  name: underlay
+  namespace: openperouter-system
+spec:
+  asn: 65001
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: node-1
+  # The tunnel endpoint address derived from cidrs is placed on the ipvlan
+  # interface instead of the loopback: in L3 mode ipvlan only delivers traffic
+  # to addresses assigned to the child interface itself.
+  tunnelEndpoint:
+    interfaceName: net1
+    cidrs:
+    - 192.168.11.0/24
+  interfaces:
+    - type: CNIDevice
+      cniDevice:
+        type: RawConfig
+        interfaceName: net1
+        rawConfig:
+          cniVersion: "1.0.0"
+          name: ipvlan-underlay
+          plugins:
+            - type: ipvlan
+              master: eth0
+              mode: l3
+              # The derived address reaches static IPAM through the ips
+              # capability argument, so it must be declared here.
+              capabilities:
+                ips: true
+              ipam:
+                type: static
+                routes:
+                  - dst: 10.250.1.0/24
+  neighbors:
+    - asn: 64515
+      address: 10.250.1.3
+      properties:
+        - type: ebgpMultiHop
+          ebgpMultiHop:
+            ttl: 10
