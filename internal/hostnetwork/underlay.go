@@ -57,6 +57,21 @@ type CNIDeviceParams struct {
 type UnderlayTunnelEndpointParams struct {
 	IPv4CIDR string `json:"ipv4_cidr"`
 	IPv6CIDR string `json:"ipv6_cidr"`
+	// InterfaceName is the CNI-provisioned underlay interface carrying the
+	// tunnel endpoint addresses; empty means the loopback.
+	InterfaceName string `json:"interface_name,omitempty"`
+}
+
+// Addresses returns the configured tunnel endpoint CIDRs.
+func (p UnderlayTunnelEndpointParams) Addresses() []string {
+	res := make([]string, 0, 2)
+	if p.IPv4CIDR != "" {
+		res = append(res, p.IPv4CIDR)
+	}
+	if p.IPv6CIDR != "" {
+		res = append(res, p.IPv6CIDR)
+	}
+	return res
 }
 
 func SetupUnderlay(ctx context.Context, params UnderlayParams) error {
@@ -97,7 +112,8 @@ func SetupUnderlay(ctx context.Context, params UnderlayParams) error {
 				return err
 			}
 		case UnderlayInterfaceCNIDev:
-			if err := SetupUnderlayCNIDevInterface(ctx, params.TargetNS, iface); err != nil {
+			if err := setupUnderlayCNIDevInterface(ctx, params.TargetNS, iface,
+				isTunnelEndpointInterface(params, iface)); err != nil {
 				return err
 			}
 		default:
@@ -109,19 +125,32 @@ func SetupUnderlay(ctx context.Context, params UnderlayParams) error {
 	if params.TunnelEndpoint == nil {
 		return nil
 	}
+	if params.TunnelEndpoint.InterfaceName != "" {
+		return ensureTunnelEndpointOnInterface(ctx, targetNetNS, *params.TunnelEndpoint)
+	}
+	return ensureLoopback(ctx, targetNetNS, params.TunnelEndpoint.Addresses()...)
+}
 
-	vtepIPs := make([]string, 0, 2)
-	if ip := params.TunnelEndpoint.IPv4CIDR; ip != "" {
-		vtepIPs = append(vtepIPs, ip)
+// TunnelEndpointNeedsReplacement reports whether the tunnel endpoint
+// addresses derived for the CNI interface carrying them changed since the
+// interface was provisioned, so that the attachment has to be torn down and
+// re-added. VXLAN devices bound to that interface must be removed first.
+func TunnelEndpointNeedsReplacement(params UnderlayParams) (bool, error) {
+	if cniinvoker.Invoker == nil {
+		return false, nil
 	}
-	if ip := params.TunnelEndpoint.IPv6CIDR; ip != "" {
-		vtepIPs = append(vtepIPs, ip)
+	for _, iface := range params.UnderlayInterfaces {
+		if iface.Kind != UnderlayInterfaceCNIDev || !isTunnelEndpointInterface(params, iface) {
+			continue
+		}
+		changed, err := cniinvoker.Invoker.CapabilityArgChanged(cniAddParams(params.TargetNS, iface),
+			cniinvoker.IPsCapability)
+		if err != nil {
+			return false, fmt.Errorf("failed to compare tunnel endpoint interface %s: %w", iface.InterfaceName, err)
+		}
+		return changed, nil
 	}
-	if err := ensureLoopback(ctx, targetNetNS, vtepIPs...); err != nil {
-		return err
-	}
-
-	return nil
+	return false, nil
 }
 
 // SetupUnderlayNetDevInterface provisions a single underlay net dev interface
@@ -138,6 +167,16 @@ func SetupUnderlayNetDevInterface(ctx context.Context, ns netns.NsHandle,
 // subsequent Add provisions it fresh.
 func SetupUnderlayCNIDevInterface(ctx context.Context, ns string,
 	iface UnderlayInterface) error {
+	return setupUnderlayCNIDevInterface(ctx, ns, iface, false)
+}
+
+// setupUnderlayCNIDevInterface provisions a single underlay cni dev interface.
+// When the interface carries the tunnel endpoint, the controller owns its ips
+// capability argument: an attachment whose ips no longer match the derived
+// ones is torn down and re-added instead of being rejected as an in-place
+// change.
+func setupUnderlayCNIDevInterface(ctx context.Context, ns string,
+	iface UnderlayInterface, carriesTunnelEndpoint bool) error {
 	if err := cniinvoker.Invoker.Check(ctx, iface.InterfaceName); err != nil {
 		slog.WarnContext(ctx, "cni check failed, rebuilding underlay cni device",
 			"interface", iface.InterfaceName, "error", err)
@@ -146,15 +185,52 @@ func SetupUnderlayCNIDevInterface(ctx context.Context, ns string,
 		}
 	}
 
-	if err := cniinvoker.Invoker.Add(ctx, cniinvoker.AddParams{
+	addParams := cniAddParams(ns, iface)
+	if carriesTunnelEndpoint {
+		if err := removeStaleTunnelEndpointAttachment(ctx, addParams); err != nil {
+			return err
+		}
+	}
+
+	if err := cniinvoker.Invoker.Add(ctx, addParams); err != nil {
+		return fmt.Errorf("failed to setup underlay cni device %s: %w", iface.InterfaceName, err)
+	}
+	return nil
+}
+
+// removeStaleTunnelEndpointAttachment deletes the cached attachment of the
+// tunnel endpoint interface when the derived addresses it carries changed, so
+// the following Add provisions it with the new ones.
+func removeStaleTunnelEndpointAttachment(ctx context.Context, addParams cniinvoker.AddParams) error {
+	changed, err := cniinvoker.Invoker.CapabilityArgChanged(addParams, cniinvoker.IPsCapability)
+	if err != nil {
+		return fmt.Errorf("failed to compare tunnel endpoint interface %s: %w", addParams.IfName, err)
+	}
+	if !changed {
+		return nil
+	}
+	slog.InfoContext(ctx, "tunnel endpoint addresses changed, replacing underlay cni device",
+		"interface", addParams.IfName, "ips", addParams.CapabilityArgs[cniinvoker.IPsCapability])
+	if err := cniinvoker.Invoker.Del(ctx, addParams.IfName); err != nil {
+		return fmt.Errorf("failed to delete stale tunnel endpoint cni device %s: %w", addParams.IfName, err)
+	}
+	return nil
+}
+
+func cniAddParams(ns string, iface UnderlayInterface) cniinvoker.AddParams {
+	return cniinvoker.AddParams{
 		Config:         iface.CNI.Config,
 		NetNS:          ns,
 		IfName:         iface.InterfaceName,
 		CapabilityArgs: iface.CNI.CapabilityArgs,
-	}); err != nil {
-		return fmt.Errorf("failed to setup underlay cni device %s: %w", iface.InterfaceName, err)
 	}
-	return nil
+}
+
+func isTunnelEndpointInterface(params UnderlayParams, iface UnderlayInterface) bool {
+	if params.TunnelEndpoint == nil {
+		return false
+	}
+	return params.TunnelEndpoint.InterfaceName == iface.InterfaceName
 }
 
 // UnderlayInterfaceKind tells how an underlay interface is provisioned.
@@ -257,6 +333,42 @@ func ensureLoopback(ctx context.Context, ns netns.NsHandle, vtepIPs ...string) e
 	}
 
 	return nil
+}
+
+// ensureTunnelEndpointOnInterface verifies the CNI chain assigned every
+// derived tunnel endpoint address to the interface carrying them. A missing
+// address means the attachment is unusable as a VTEP: it is torn down so the
+// next reconcile provisions it again instead of trusting the cached result.
+func ensureTunnelEndpointOnInterface(ctx context.Context, ns netns.NsHandle,
+	tunnelEndpoint UnderlayTunnelEndpointParams) error {
+	slog.DebugContext(ctx, "setup underlay", "step", "verifying tunnel endpoint interface",
+		"interface", tunnelEndpoint.InterfaceName)
+
+	err := netnamespace.In(ns, func() error {
+		link, err := netlink.LinkByName(tunnelEndpoint.InterfaceName)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve tunnel endpoint interface %s: %w", tunnelEndpoint.InterfaceName, err)
+		}
+		for _, address := range tunnelEndpoint.Addresses() {
+			hasIP, err := interfaceHasIP(link, address)
+			if err != nil {
+				return err
+			}
+			if !hasIP {
+				return fmt.Errorf("tunnel endpoint address %s is missing from interface %s",
+					address, tunnelEndpoint.InterfaceName)
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	if delErr := cniinvoker.Invoker.Del(ctx, tunnelEndpoint.InterfaceName); delErr != nil {
+		return errors.Join(err, fmt.Errorf("failed to delete invalid tunnel endpoint cni device %s: %w",
+			tunnelEndpoint.InterfaceName, delErr))
+	}
+	return err
 }
 
 // RestoreUnderlay restores the underlay state:

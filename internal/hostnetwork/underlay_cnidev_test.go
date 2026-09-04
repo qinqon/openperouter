@@ -42,21 +42,41 @@ var underlayCNITestConfig = fmt.Sprintf(`{
   ]
 }`, underlayCNITestPlugin)
 
-// fakeCNIPlugin creates a dummy link with a fixed address inside CNI_NETNS on
-// ADD and deletes it on DEL, recording every invocation in CNI_TEST_LOG. On
-// CHECK it verifies the link still exists in the netns, so tests can drive a
-// real CHECK failure by deleting the link behind the invoker's back. It lets
-// the tests exercise the full CNI provisioning path without shipping real
-// plugins.
+// underlayCNITestConfigWithIPs declares the ips capability, so libcni forwards
+// the ips capability argument to the fake plugin, which assigns those
+// addresses instead of its fixed one, mimicking ipvlan with static IPAM.
+var underlayCNITestConfigWithIPs = fmt.Sprintf(`{
+  "cniVersion": "1.0.0",
+  "name": "underlay-cni-test",
+  "plugins": [
+    {
+      "type": %q,
+      "capabilities": {"ips": true}
+    }
+  ]
+}`, underlayCNITestPlugin)
+
+// fakeCNIPlugin creates a dummy link inside CNI_NETNS on ADD and deletes it
+// on DEL, recording every invocation in CNI_TEST_LOG. The link gets the
+// addresses of the ips capability argument when present, a fixed address
+// otherwise. On CHECK it verifies the link still exists in the netns, so
+// tests can drive a real CHECK failure by deleting the link behind the
+// invoker's back. It lets the tests exercise the full CNI provisioning path
+// without shipping real plugins.
 const fakeCNIPlugin = `#!/bin/sh
 set -e
 echo "$CNI_COMMAND $CNI_IFNAME" >> "$CNI_TEST_LOG"
+stdin=$(cat)
+ips=$(printf '%s' "$stdin" | grep -o '"ips":\[[^]]*\]' | grep -o '[0-9a-fA-F.:]*/[0-9]*' || true)
+[ -n "$ips" ] || ips="` + underlayCNITestAddress + `"
 case "$CNI_COMMAND" in
 ADD)
   nsenter --net="$CNI_NETNS" ip link add "$CNI_IFNAME" type dummy
-  nsenter --net="$CNI_NETNS" ip addr add "` + underlayCNITestAddress + `" dev "$CNI_IFNAME"
+  for ip in $ips; do
+    nsenter --net="$CNI_NETNS" ip addr add "$ip" dev "$CNI_IFNAME"
+  done
   nsenter --net="$CNI_NETNS" ip link set "$CNI_IFNAME" up
-  echo "{\"cniVersion\":\"1.0.0\",\"interfaces\":[{\"name\":\"$CNI_IFNAME\",\"sandbox\":\"$CNI_NETNS\"}],\"ips\":[{\"address\":\"` + underlayCNITestAddress + `\",\"interface\":0}]}"
+  echo "{\"cniVersion\":\"1.0.0\",\"interfaces\":[{\"name\":\"$CNI_IFNAME\",\"sandbox\":\"$CNI_NETNS\"}],\"ips\":[{\"address\":\"$(echo $ips | cut -d' ' -f1)\",\"interface\":0}]}"
   ;;
 DEL)
   nsenter --net="$CNI_NETNS" ip link del "$CNI_IFNAME" 2>/dev/null || true
@@ -243,6 +263,108 @@ var _ = Describe("Underlay CNI configuration", func() {
 		Expect(loggedCommands()).To(ConsistOf("ADD net1", "DEL net1"))
 	})
 
+	Context("with the tunnel endpoint on the cni interface", func() {
+		const endpointAddress = "192.168.11.7/32"
+		const newEndpointAddress = "192.168.11.8/32"
+
+		endpointParams := func(address string) UnderlayParams {
+			return UnderlayParams{
+				TargetNS: underlayCNITestNSPath(),
+				UnderlayInterfaces: []UnderlayInterface{{
+					InterfaceName: "net1",
+					Kind:          UnderlayInterfaceCNIDev,
+					CNI: &CNIDeviceParams{
+						Config:         []byte(underlayCNITestConfigWithIPs),
+						CapabilityArgs: map[string]any{"ips": []any{address}},
+					},
+				}},
+				TunnelEndpoint: &UnderlayTunnelEndpointParams{
+					IPv4CIDR:      address,
+					InterfaceName: "net1",
+				},
+			}
+		}
+
+		It("places the tunnel endpoint addresses on the cni interface instead of the loopback", func() {
+			Expect(SetupUnderlay(context.Background(), endpointParams(endpointAddress))).To(Succeed())
+
+			err := netnamespace.In(testNs, func() error {
+				link, err := netlink.LinkByName("net1")
+				Expect(err).NotTo(HaveOccurred())
+				validateIP(Default, link, endpointAddress)
+				Expect(loopbackHasNoNonLoopbackIPs()).To(BeTrue(), "the loopback should not carry the tunnel endpoint")
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("binds the vxlan devices to the cni interface", func() {
+			Expect(SetupUnderlay(context.Background(), endpointParams(endpointAddress))).To(Succeed())
+
+			vni := L2VNIParams{
+				Name: "endpointvni",
+				VNIParams: VNIParams{
+					TargetNS:   underlayCNITestNSPath(),
+					VTEPIP:     endpointAddress,
+					VTEPDevice: "net1",
+					VNI:        110,
+					VXLanPort:  new(int32(4789)),
+				},
+			}
+			Expect(SetupL2VNI(context.Background(), vni)).To(Succeed())
+
+			err := netnamespace.In(testNs, func() error {
+				validateVNI(Default, vni.VNIParams)
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("is idempotent when the tunnel endpoint addresses do not change", func() {
+			Expect(SetupUnderlay(context.Background(), endpointParams(endpointAddress))).To(Succeed())
+			Expect(TunnelEndpointNeedsReplacement(endpointParams(endpointAddress))).To(BeFalse())
+			Expect(SetupUnderlay(context.Background(), endpointParams(endpointAddress))).To(Succeed())
+
+			Expect(loggedCommands()).To(HaveExactElements("ADD net1", "CHECK net1"))
+		})
+
+		It("replaces the cni attachment when the tunnel endpoint addresses change", func() {
+			Expect(SetupUnderlay(context.Background(), endpointParams(endpointAddress))).To(Succeed())
+
+			Expect(TunnelEndpointNeedsReplacement(endpointParams(newEndpointAddress))).To(BeTrue())
+			Expect(SetupUnderlay(context.Background(), endpointParams(newEndpointAddress))).To(Succeed())
+
+			Expect(loggedCommands()).To(HaveExactElements("ADD net1", "CHECK net1", "DEL net1", "ADD net1"),
+				"a change in the derived addresses should tear down and re-provision the interface")
+			err := netnamespace.In(testNs, func() error {
+				link, err := netlink.LinkByName("net1")
+				Expect(err).NotTo(HaveOccurred())
+				validateIP(Default, link, newEndpointAddress)
+				hasOld, err := interfaceHasIP(link, endpointAddress)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(hasOld).To(BeFalse(), "the old tunnel endpoint address should be gone")
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("tears down the attachment when the cni chain does not assign the tunnel endpoint addresses", func() {
+			params := endpointParams(endpointAddress)
+			// Without the ips capability declared, libcni strips the argument
+			// and the fake plugin falls back to its fixed address.
+			params.UnderlayInterfaces[0].CNI.Config = []byte(underlayCNITestConfig)
+
+			Expect(SetupUnderlay(context.Background(), params)).To(MatchError(ContainSubstring(
+				"tunnel endpoint address 192.168.11.7/32 is missing from interface net1")))
+
+			Expect(loggedCommands()).To(HaveExactElements("ADD net1", "DEL net1"),
+				"the invalid attachment should not be left in the cache")
+			cached, err := cniinvoker.Invoker.CachedIfNames()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cached).To(BeEmpty())
+		})
+	})
+
 	It("provisions again after the namespace is rebuilt and the cache cleared", func() {
 		Expect(SetupUnderlay(context.Background(), cniParams("net1"))).To(Succeed())
 
@@ -260,6 +382,21 @@ var _ = Describe("Underlay CNI configuration", func() {
 		validateCNIInterfaceInNS(testNs, "net1")
 	})
 })
+
+// loopbackHasNoNonLoopbackIPs tells whether the loopback of the current
+// namespace carries only its default loopback addresses.
+func loopbackHasNoNonLoopbackIPs() bool {
+	lo, err := netlink.LinkByName(loopbackName)
+	Expect(err).NotTo(HaveOccurred())
+	addresses, err := netlink.AddrList(lo, netlink.FAMILY_ALL)
+	Expect(err).NotTo(HaveOccurred())
+	for _, address := range addresses {
+		if !address.IP.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
 
 // validateCNIInterfaceInNS checks that the CNI-provisioned interface exists
 // in the namespace, is up, has the address the fake plugin assigns and does

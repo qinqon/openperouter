@@ -25,9 +25,12 @@ const (
 )
 
 type VNIParams struct {
-	VRF            string `json:"vrf"`
-	TargetNS       string `json:"targetns"`
-	VTEPIP         string `json:"vtepip"`
+	VRF      string `json:"vrf"`
+	TargetNS string `json:"targetns"`
+	VTEPIP   string `json:"vtepip"`
+	// VTEPDevice is the interface the VXLAN device sources its traffic
+	// from; empty means the loopback.
+	VTEPDevice     string `json:"vtepdevice,omitempty"`
 	VNI            int32  `json:"vni"`
 	VXLanPort      *int32 `json:"vxlanPort,omitempty"`
 	TunnelOverhead int    `json:"tunneloverhead"`
