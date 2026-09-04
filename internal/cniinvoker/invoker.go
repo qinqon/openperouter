@@ -7,13 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
-	"slices"
 
 	"github.com/containernetworking/cni/libcni"
 )
 
 const ipamTypeDHCP = "dhcp"
+
+// IPsCapability is the CNI capability carrying the addresses a runtime asks
+// the plugin chain to assign, consumed by the static IPAM plugin.
+const IPsCapability = "ips"
 
 // Invoker is the node-level CNI plugin invoker singleton, nil until Init is
 // called.
@@ -68,16 +72,12 @@ func (e ConfigMismatchError) Error() string {
 // same config skips the invocation, one with a different config returns a
 // ConfigMismatchError leaving the interface untouched.
 func (inv *invoker) Add(ctx context.Context, p AddParams) error {
-	cached, err := inv.cniConfig.GetCachedAttachments(inv.containerID)
+	cached, err := inv.findCachedAttachmentByInterfaceName(p.IfName)
 	if err != nil {
-		return fmt.Errorf("failed to read cni cache for %q: %w", inv.containerID, err)
+		return fmt.Errorf("failed finding cni attachment with ifname %q to add: %w", p.IfName, err)
 	}
-
-	idx := slices.IndexFunc(cached, func(n *libcni.NetworkAttachment) bool {
-		return n.IfName == p.IfName
-	})
-	if idx >= 0 {
-		return validateCachedAttachment(cached[idx], p)
+	if cached != nil {
+		return validateCachedAttachment(cached, p)
 	}
 
 	confList, err := libcni.NetworkConfFromBytes(p.Config)
@@ -106,6 +106,35 @@ func (inv *invoker) Add(ctx context.Context, p AddParams) error {
 		return addErr
 	}
 	return nil
+}
+
+// CapabilityArgChanged reports whether a cached attachment exists for
+// p.IfName that matches p in everything but the value of the given
+// capability argument. It lets a caller that owns that argument replace
+// the attachment on purpose instead of hitting the ConfigMismatchError
+// raised by Add for any other in-place change.
+func (inv *invoker) CapabilityArgChanged(p AddParams, capability string) (bool, error) {
+	cached, err := inv.findCachedAttachmentByInterfaceName(p.IfName)
+	if err != nil {
+		return false, fmt.Errorf("failed finding cni attachment with ifname %q to compare: %w", p.IfName, err)
+	}
+	if cached == nil {
+		return false, nil
+	}
+	sameConfig, err := jsonEqual(cached.Config, p.Config)
+	if err != nil {
+		return false, fmt.Errorf("failed to compare cni config for %q: %w", p.IfName, err)
+	}
+	if !sameConfig {
+		return false, nil
+	}
+	if capabilityArgsEqual(cached.CapabilityArgs, p.CapabilityArgs) {
+		return false, nil
+	}
+	return capabilityArgsEqual(
+		withoutCapability(cached.CapabilityArgs, capability),
+		withoutCapability(p.CapabilityArgs, capability),
+	), nil
 }
 
 // validateCachedAttachment returns a ConfigMismatchError when the cached
@@ -236,6 +265,12 @@ func capabilityArgsEqual(a, b map[string]any) bool {
 		return true
 	}
 	return reflect.DeepEqual(a, b)
+}
+
+func withoutCapability(args map[string]any, capability string) map[string]any {
+	res := maps.Clone(args)
+	delete(res, capability)
+	return res
 }
 
 func (inv *invoker) ensureDHCPForConfList(ctx context.Context, confList *libcni.NetworkConfigList) error {

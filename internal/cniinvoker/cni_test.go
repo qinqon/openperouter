@@ -142,6 +142,73 @@ func TestAddCleansUpAfterFailedAdd(t *testing.T) {
 	}
 }
 
+func TestCapabilityArgChanged(t *testing.T) {
+	ipsV1 := map[string]any{"mac": "02:42:c0:a8:01:0a", "ips": []any{"192.168.11.1/32"}}
+	ipsV2 := map[string]any{"mac": "02:42:c0:a8:01:0a", "ips": []any{"192.168.11.2/32"}}
+	tests := []struct {
+		name      string
+		cached    *AddParams
+		requested AddParams
+		want      bool
+	}{
+		{
+			name:      "no cached attachment",
+			requested: AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV1},
+		},
+		{
+			name:      "same capability args",
+			cached:    &AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV1},
+			requested: AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV1},
+		},
+		{
+			name:      "only ips changed",
+			cached:    &AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV1},
+			requested: AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV2},
+			want:      true,
+		},
+		{
+			name:   "ips added to an attachment without capability args",
+			cached: &AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1"},
+			requested: AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1",
+				CapabilityArgs: map[string]any{"ips": []any{"192.168.11.1/32"}}},
+			want: true,
+		},
+		{
+			name:   "ips and another capability changed",
+			cached: &AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV1},
+			requested: AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1",
+				CapabilityArgs: map[string]any{"mac": "02:42:c0:a8:01:0b", "ips": []any{"192.168.11.2/32"}}},
+		},
+		{
+			name:   "ips and config changed",
+			cached: &AddParams{Config: []byte(fakeConfList), NetNS: netNS, IfName: "net1", CapabilityArgs: ipsV1},
+			requested: AddParams{
+				Config:         []byte(`{"cniVersion":"1.0.0","name":"underlay-test","plugins":[{"type":"fake","mtu":1400}]}`),
+				NetNS:          netNS,
+				IfName:         "net1",
+				CapabilityArgs: ipsV2,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := newFakePluginEnv(t)
+			if tt.cached != nil {
+				if err := env.invoker().Add(context.Background(), *tt.cached); err != nil {
+					t.Fatalf("Add failed: %v", err)
+				}
+			}
+			got, err := env.invoker().CapabilityArgChanged(tt.requested, IPsCapability)
+			if err != nil {
+				t.Fatalf("CapabilityArgChanged failed: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("CapabilityArgChanged = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAddForwardsDeclaredCapabilitiesOnly(t *testing.T) {
 	env := newFakePluginEnv(t)
 
