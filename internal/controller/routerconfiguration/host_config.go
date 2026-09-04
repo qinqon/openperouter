@@ -62,14 +62,15 @@ func (k *KernelDatapathConfigurator) Configure(ctx context.Context, config inter
 		return err
 	}
 
-	removeAllVNIs, err := areAllUnderlayInterfacesToBeRemoved(ctx, config, hostConfig)
+	removeAllVNIs, err := mustRebuildVNIs(ctx, config, hostConfig)
 	if err != nil {
 		return err
 	}
 	if removeAllVNIs {
 		// VXLAN tunnels are bound to the current underlay interfaces. If all underlay interfaces are being
-		// replaced, tear down the VNIs first so they don't reference stale interfaces; they'll be recreated
-		// on top of the new underlay.
+		// replaced, or the interface carrying the tunnel endpoint is being re-provisioned with new
+		// addresses, tear down the VNIs first so they don't reference stale interfaces; they'll be
+		// recreated on top of the new underlay.
 		if err := hostnetwork.RemoveAllVNIs(config.targetNamespace); err != nil {
 			slog.Warn("failed to remove vnis during underlay change", "err", err)
 		}
@@ -251,6 +252,32 @@ func ensureSysctlsForConfig(ctx context.Context, config interfacesConfiguration)
 
 func isSRV6(underlay v1alpha1.Underlay) bool {
 	return underlay.Spec.SRV6 != nil
+}
+
+// mustRebuildVNIs tells whether the VNIs have to be torn down before setting
+// up the underlay: either because every underlay interface is being replaced
+// or because the interface carrying the tunnel endpoint needs re-provisioning.
+func mustRebuildVNIs(
+	ctx context.Context,
+	config interfacesConfiguration,
+	hostConfig conversion.HostConfigData,
+) (bool, error) {
+	allRemoved, err := areAllUnderlayInterfacesToBeRemoved(ctx, config, hostConfig)
+	if err != nil {
+		return false, err
+	}
+	if allRemoved {
+		return true, nil
+	}
+	endpointReplaced, err := hostnetwork.TunnelEndpointNeedsReplacement(hostConfig.Underlay)
+	if err != nil {
+		return false, fmt.Errorf("failed to check the tunnel endpoint interface: %w", err)
+	}
+	if endpointReplaced {
+		slog.InfoContext(ctx, "tunnel endpoint addresses changed, cleaning up VNIs before replacing the interface",
+			"interface", hostConfig.Underlay.TunnelEndpoint.InterfaceName)
+	}
+	return endpointReplaced, nil
 }
 
 // areAllUnderlayInterfacesToBeRemoved tells whether every underlay interface
