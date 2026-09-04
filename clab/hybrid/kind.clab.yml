@@ -4,7 +4,7 @@ topology:
     # Spine - Route Reflector
     spine:
       kind: linux
-      image: quay.io/frrouting/frr:10.2.1
+      image: quay.io/frrouting/frr:10.6.0
       binds:
         - ../frrcommon/daemons:/etc/frr/daemons
         - ../frrcommon/vtysh.conf:/etc/frr/vtysh.conf
@@ -16,7 +16,7 @@ topology:
     # On-prem leaf for kind cluster
     leafkind:
       kind: linux
-      image: quay.io/frrouting/frr:10.2.1
+      image: quay.io/frrouting/frr:10.6.0
       binds:
         - ../frrcommon/daemons:/etc/frr/daemons
         - ../frrcommon/vtysh.conf:/etc/frr/vtysh.conf
@@ -43,7 +43,7 @@ topology:
     # L3VNI test leaf (peers with spine, hosts test container)
     leafl3test:
       kind: linux
-      image: quay.io/frrouting/frr:10.2.1
+      image: quay.io/frrouting/frr:10.6.0
       binds:
         - ../frrcommon/daemons:/etc/frr/daemons
         - ../frrcommon/vtysh.conf:/etc/frr/vtysh.conf

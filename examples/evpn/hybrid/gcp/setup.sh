@@ -406,7 +406,13 @@ for NODE in $WORKER_NODES; do
 done
 
 echo ""
-echo "=== Adding Whereabouts IPs as Alias IPs to GCE Instances ==="
+echo "=== Adding the OpenPERouter VTEP addresses as Alias IPs to GCE Instances ==="
+
+# OpenPERouter derives the VTEP address of each node from the tunnel endpoint
+# pool and the node index, and places it on the ipvlan underlay interface. GCP
+# only delivers traffic to addresses it knows belong to the instance, so each
+# VTEP is registered as an alias IP of the node's NIC.
+source "${SCRIPT_DIR}/vtep.sh"
 
 for NODE in $WORKER_NODES; do
   echo ""
@@ -421,49 +427,14 @@ for NODE in $WORKER_NODES; do
   echo "  Instance: $INSTANCE_NAME"
   echo "  Zone: $ZONE"
 
-  # Get router pods running on this node
-  ROUTER_PODS=$(kubectl get pods -n openperouter-system \
-    -l app=router \
-    --field-selector spec.nodeName=$NODE \
-    -o jsonpath='{.items[*].metadata.name}')
+  VTEP_IP=$(vtep_ip_for_node "$NODE" "${WORKER_SUBNET_CIDR}")
+  echo "  VTEP address: $VTEP_IP"
 
-  if [[ -z "$ROUTER_PODS" ]]; then
-    echo "  No router pods found on this node, skipping..."
-    continue
-  fi
-
-  # Collect all whereabouts IPs from router pods on this node
-  ALIAS_IPS=()
-  for POD in $ROUTER_PODS; do
-    echo "  Checking pod: $POD"
-
-    # Get IP from network-status annotation (whereabouts-assigned IP)
-    WHEREABOUTS_IP=$(kubectl get pod -n openperouter-system $POD \
-      -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' | \
-      jq -r '.[] | select(.name=="openperouter-system/underlay") | .ips[0]' 2>/dev/null || true)
-
-    if [[ -n "$WHEREABOUTS_IP" ]]; then
-      echo "    Found whereabouts IP: $WHEREABOUTS_IP"
-      ALIAS_IPS+=("openperouter-network:$WHEREABOUTS_IP/32")
-    fi
-  done
-
-  if [[ ${#ALIAS_IPS[@]} -eq 0 ]]; then
-    echo "  No whereabouts IPs found, skipping..."
-    continue
-  fi
-
-  # Build the alias list with the whereabouts IPs
-  ALIASES_PARAM="--aliases=$(IFS=,; echo "${ALIAS_IPS[*]}")"
-
-  echo "  Adding whereabouts IPs as aliases: ${ALIAS_IPS[@]}"
-
-  # Update the instance with the new alias IPs
   gcloud compute instances network-interfaces update $INSTANCE_NAME \
     --zone=$ZONE \
     --network-interface=nic0 \
-    $ALIASES_PARAM
-  echo "  ✓ Alias IPs updated successfully"
+    --aliases="openperouter-network:${VTEP_IP}/32"
+  echo "  ✓ Alias IP updated successfully"
 done
 
 echo ""

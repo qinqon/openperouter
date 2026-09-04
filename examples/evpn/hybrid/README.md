@@ -25,18 +25,18 @@ examples/evpn/hybrid/
 ├── gcp/                      # GCP OpenShift cluster configurations
 │   ├── network.env           # Network configuration (subnets, IPs, ASNs)
 │   ├── setup.sh              # GCP infrastructure (VPN, routes, firewall, alias IPs)
-│   ├── underlay.sh           # Generate per-node Underlay CRDs with BGP mesh
+│   ├── underlay.sh           # Generate per-node Underlay CRDs (ipvlan L3 CNIDevice, BGP mesh)
 │   ├── vni.yaml              # L2VNI (110) + L3VNI (100) configuration
 │   ├── workload.yaml         # VM workload on EVPN network
 │   ├── migration-l2vni.yaml  # Migration L2VNI (666) for CCLM
 │   ├── migration-nad.yaml    # Migration network NAD (whereabouts IPAM)
+│   ├── vtep.sh               # Computes the VTEP OpenPERouter derives for a node
 │   ├── migrated-workload.yaml# Target VM definition for migration
 │   ├── dst-migration.yaml    # VMIM receiver for cross-cluster migration
 │   └── openshift/
 │       ├── install.sh        # Helm install OpenPERouter operator
 │       ├── prepare.sh        # HCO patches for CCLM feature gate
-│       ├── values.yaml       # Helm values for OpenPERouter
-│       └── ipvlan.yaml       # Underlay NAD (ipvlan + whereabouts)
+│       └── values.yaml       # Helm values for OpenPERouter
 └── prem/                     # On-premises Kind cluster configurations
     ├── underlay.yaml         # Underlay CRD for Kind cluster
     ├── vni.yaml              # L2VNI configuration (matches GCP)
@@ -56,7 +56,7 @@ examples/evpn/hybrid/
 │  │  L2VNI 110: 192.170.1.0/24                 │         │      │  │ worker-1  │    │ worker-2  │    │
 │  │  Migration L2VNI 666: 192.170.10.0/24      │         │      │  │  router   │    │  router   │    │
 │  │  VTEP: 100.65.0.0/24                       │         │      │  │192.168.11 │    │192.168.11 │    │
-│  └──────────────┬─────────────────────────────┘         │      │  │   .10     │    │   .11     │    │
+│  └──────────────┬─────────────────────────────┘         │      │  │.<nodeidx> │    │.<nodeidx> │    │
 │                 │                                       │      │  └─────┬─────┘    └─────┬─────┘    │
 │            ┌────┴────┐                                  │      │        └────────┬───────┘          │
 │            │  spine  │                                  │ VPN  │            BGP Mesh                │
@@ -89,7 +89,7 @@ VTEP Subnets:
 ## Terminology
 
 **OpenPERouter CRDs** (Kubernetes custom resources):
-- **Underlay**: Configures BGP peering and VTEP CIDR for the router pod
+- **Underlay**: Configures BGP peering, the underlay interfaces (moved host devices or CNI-provisioned ones) and the tunnel endpoint (VTEP) pool of the router
 - **L2VNI**: Creates Layer 2 overlay with VXLAN, bridge interfaces, and EVPN Type-2/3 routes
 - **L3VNI**: Creates VRF with VXLAN VNI for symmetric IRB inter-subnet routing
 
@@ -156,8 +156,6 @@ This installs OpenPERouter using Helm with the following configuration:
 openperouter:
   runOnMaster: false
   logLevel: debug
-  multusNetworkAnnotation:
-      '[{ "name": "underlay", "namespace": "openperouter-system" }]'
   cri: crio
   image:
     tag: gcp
@@ -165,35 +163,11 @@ openperouter:
     pullPolicy: Always
 ```
 
-And creates the underlay NAD:
-
-```yaml
-# gcp/openshift/ipvlan.yaml
-apiVersion: "k8s.cni.cncf.io/v1"
-kind: NetworkAttachmentDefinition
-metadata:
-  name: underlay
-  namespace: openperouter-system
-spec:
-  config: |
-    {
-      "cniVersion": "0.3.1",
-      "name": "ipvlan-net",
-      "type": "ipvlan",
-      "master": "br-ex",
-      "linkInContainer": false,
-      "mode": "l3",
-      "ipam": {
-        "type": "whereabouts",
-        "range": "192.168.11.0/24",
-        "range_start": "192.168.11.10",
-        "range_end": "192.168.11.250",
-        "routes": [
-          { "dst": "10.250.1.0/24", "via": "net1"}
-        ]
-      }
-    }
-```
+The underlay interface of each router is not attached through Multus: it is
+provisioned by OpenPERouter itself from the CNI configuration embedded in the
+Underlay (`CNIDevice`), see [Configure Underlay BGP Mesh](#configure-underlay-bgp-mesh).
+No Multus, NetworkAttachmentDefinition nor Whereabouts is needed on the router
+side.
 
 #### Configure GCP Infrastructure
 
@@ -231,24 +205,27 @@ Most values can be auto-discovered from Kubernetes Underlay CRDs:
 ```bash
 # GCP VTEP CIDR (from GCP OpenShift)
 kubectl --context gcp get underlay -n openperouter-system \
-  -o jsonpath='{.items[0].spec.evpn.vtepcidr}'
+  -o jsonpath='{.items[0].spec.tunnelEndpoint.cidrs[0]}'
 
 # On-prem VTEP CIDR (from on-prem Kind)
 kubectl --context prem get underlay -n openperouter-system \
-  -o jsonpath='{.items[0].spec.evpn.vtepcidr}'
+  -o jsonpath='{.items[0].spec.tunnelEndpoint.cidrs[0]}'
 
-# Leafgcp address and ASN (from GCP Underlay neighbors with ebgpMultiHop)
+# Leafgcp address and ASN (from GCP Underlay neighbors with the ebgpMultiHop property)
 kubectl --context gcp get underlay -n openperouter-system \
-  -o jsonpath='{.items[0].spec.neighbors[?(@.ebgpMultiHop==true)].address}'
+  -o jsonpath='{.items[0].spec.neighbors[?(@.properties[0].type=="ebgpMultiHop")].address}'
 kubectl --context gcp get underlay -n openperouter-system \
-  -o jsonpath='{.items[0].spec.neighbors[?(@.ebgpMultiHop==true)].asn}'
+  -o jsonpath='{.items[0].spec.neighbors[?(@.properties[0].type=="ebgpMultiHop")].asn}'
 ```
 
 **Note**: `L3VNI_VTEP_CIDR` (leafl3test) is not discoverable from Kubernetes as it's a pure FRR container in containerlab.
 
 The script automatically:
 - Creates secondary IP range (192.168.11.0/24) on worker subnet
-- Assigns whereabouts IPs to GCP instances as alias IPs
+- Registers the VTEP address of each worker as an alias IP of the GCP instance.
+  The address is not discovered at runtime: OpenPERouter derives it from the
+  tunnel endpoint pool and the node index (`openpe.io/nodeindex` annotation),
+  which `gcp/vtep.sh` reproduces
 - Configures VPN gateway and tunnel with traffic selectors
 - Configures Cloud Router BGP session (advertises 192.168.11.0/24 to on-prem)
 - Configures firewall rules (BGP, VXLAN, ICMP)
@@ -312,7 +289,7 @@ The `virt-synchronization-controller` pods need to be reachable from the source 
 
 1. **Move to worker nodes** (current approach): Patch HCO to schedule `virt-synchronization-controller` on workers where the OpenPERouter overlay is available. Simple but has a downside: control plane pods have a higher priority class, making them less likely to be evicted under node resource pressure. If a `virt-synchronization-controller` pod is evicted during an active migration, the migration must restart. Running on workers increases eviction risk compared to control plane placement. This can be mitigated by configuring a custom PriorityClass for these pods.
 
-2. **OpenPERouter node role aware multus annotation** ([PR #217](https://github.com/openperouter/openperouter/pull/217)): Implement OpenPERouter enhancement to use different multus annotation depending on nodes being control plane or workers. This removes the need to relocate the controller and preserves the default priority class behavior.
+2. **Node-scoped Underlays**: Underlays carry a `nodeSelector`, so control plane nodes could get their own Underlay with an ipvlan interface on their NIC and join the overlay, letting the controller stay where it is and keep the default priority class behavior. Not exercised by this PoC.
 
 #### Configure Underlay BGP Mesh
 
@@ -320,27 +297,63 @@ The `virt-synchronization-controller` pods need to be reachable from the source 
 ./gcp/underlay.sh
 ```
 
-This generates per-node Underlay CRDs with mesh BGP topology:
+This generates per-node Underlay CRDs with mesh BGP topology. Each router gets
+an `ipvlan` interface in L3 mode on top of `br-ex`, provisioned by OpenPERouter
+through the embedded CNI configuration (`CNIDevice`): GCP rejects traffic
+sourced from MAC addresses other than the one of the VM NIC, which rules out
+`macvlan`, and ipvlan L3 fits the routed nature of the VPC.
+
+The VTEP address is derived by OpenPERouter from `tunnelEndpoint.cidrs` and the
+node index, and placed on the ipvlan interface (`tunnelEndpoint.interfaceName`)
+instead of the router loopback: in L3 mode ipvlan only delivers incoming
+traffic to addresses assigned to the child interface itself, so a loopback
+VTEP would never receive the return VXLAN traffic. OpenPERouter hands the
+derived address to the CNI chain through the `ips` capability, which is why the
+ipvlan plugin declares it and uses `static` IPAM.
 
 ```yaml
-apiVersion: openpe.openperouter.github.io/v1alpha1
+apiVersion: network.openperouter.io/v1alpha1
 kind: Underlay
 metadata:
   name: worker-c-xxxxx
   namespace: openperouter-system
 spec:
   asn: 65001
-  evpn:
-    vtepcidr: 192.168.11.0/24
   nodeSelector:
     matchLabels:
       kubernetes.io/hostname: worker-c-xxxxx.c.project.internal
+  tunnelEndpoint:
+    interfaceName: net1
+    cidrs:
+    - 192.168.11.0/24
+  interfaces:
+    - type: CNIDevice
+      cniDevice:
+        type: RawConfig
+        interfaceName: net1
+        rawConfig:
+          cniVersion: "1.0.0"
+          name: ipvlan-underlay
+          plugins:
+            - type: ipvlan
+              master: br-ex
+              mode: l3
+              capabilities:
+                ips: true
+              ipam:
+                type: static
+                routes:
+                  - dst: 10.250.1.0/24    # on-prem leafgcp, through the VPN
+                  - dst: 192.168.11.0/24  # the other GCP workers
   neighbors:
     - asn: 65002
-      address: 192.168.11.11    # Peer with other GCP worker
+      address: 192.168.11.1     # Peer with other GCP worker (its VTEP)
     - asn: 64515
       address: 10.250.1.3       # Peer with on-prem leafgcp
-      ebgpMultiHop: true
+      properties:
+        - type: ebgpMultiHop
+          ebgpMultiHop:
+            ttl: 10
 ```
 
 #### Apply L2VNI, L3VNI and Migration Network
@@ -388,17 +401,20 @@ The on-prem underlay configuration:
 
 ```yaml
 # prem/underlay.yaml
-apiVersion: openpe.openperouter.github.io/v1alpha1
+apiVersion: network.openperouter.io/v1alpha1
 kind: Underlay
 metadata:
   name: underlay
   namespace: openperouter-system
 spec:
   asn: 64514
-  evpn:
-    vtepcidr: 100.65.0.0/24
-  nics:
-    - toswitch
+  tunnelEndpoint:
+    cidrs:
+    - 100.65.0.0/24
+  interfaces:
+    - type: NetworkDevice
+      networkDevice:
+        interfaceName: toswitch
   neighbors:
     - asn: 64512
       address: 10.250.11.1
@@ -415,23 +431,23 @@ The `prepare.sh` script handles KubeVirt installation with:
 
 ### Migration Network Configuration
 
-Both clusters have a dedicated migration L2VNI stretched between them:
+Both clusters have a dedicated migration L2VNI stretched between them. It is
+a disconnected L2VNI, pure east-west layer 2 without routing domain nor
+gateway, since the migration traffic only flows between the two clusters:
 
 ```yaml
 # L2VNI 666 - Migration Network
-apiVersion: openpe.openperouter.github.io/v1alpha1
+apiVersion: network.openperouter.io/v1alpha1
 kind: L2VNI
 metadata:
   name: migration-net
   namespace: openperouter-system
 spec:
-  hostmaster:
-    type: linux-bridge
-    linuxBridge:
-      autoCreate: true
-  l2gatewayips: ["192.170.10.1/24"]
   vni: 666
-  vrf: rouge
+  hostMaster:
+    type: LinuxBridge
+    linuxBridge:
+      lifecycle: Managed
 ```
 
 The migration NAD uses whereabouts with non-overlapping ranges:
@@ -480,19 +496,22 @@ EOF
 ### L2VNI 110 (Layer 2 Stretching)
 
 ```yaml
-apiVersion: openpe.openperouter.github.io/v1alpha1
+apiVersion: network.openperouter.io/v1alpha1
 kind: L2VNI
 metadata:
   name: layer2
   namespace: openperouter-system
 spec:
-  hostmaster:
-    type: linux-bridge
-    linuxBridge:
-      autoCreate: true
-  l2gatewayips: ["192.170.1.1/24"]
   vni: 110
-  vrf: red
+  routingDomain:
+    type: L3VNI
+    l3vni:
+      name: red
+  hostMaster:
+    type: LinuxBridge
+    linuxBridge:
+      lifecycle: Managed
+  gatewayIPs: ["192.170.1.1/24"]
 ```
 
 - **Network**: 192.170.1.0/24
@@ -503,7 +522,7 @@ spec:
 ### L3VNI 100 (Inter-Subnet Routing)
 
 ```yaml
-apiVersion: openpe.openperouter.github.io/v1alpha1
+apiVersion: network.openperouter.io/v1alpha1
 kind: L3VNI
 metadata:
   name: red
@@ -880,10 +899,13 @@ PING 192.170.1.1 (192.170.1.1) 56(84) bytes of data.
      asn: 65001  # worker-1 (65002 for worker-2, etc.)
      neighbors:
        - asn: 65002
-         address: 192.168.11.11    # Peer with other GCP workers
+         address: 192.168.11.1     # Peer with other GCP workers (their VTEP)
        - asn: 64515
          address: 10.250.1.3       # Peer with on-prem leafgcp
-         ebgpMultiHop: true
+         properties:
+           - type: ebgpMultiHop
+             ebgpMultiHop:
+               ttl: 10
    ```
 
 5. **Inter-subnet routing requirements** (leafl3test ↔ GCP):
@@ -1100,13 +1122,11 @@ This section outlines the limitations of the current PoC and potential improveme
 
 The current PoC uses a full mesh BGP topology for the underlay on GCP. This does not scale well as the number of nodes increases.
 
-**Improvement**: Replace the underlay mesh with a Route Reflector topology, reducing BGP sessions from O(n²) to O(n).
-
-**OpenPERouter Route Reflector Enhancement**: https://github.com/openperouter/openperouter/pull/218
+**Improvement**: Replace the underlay mesh with a Route Reflector topology, reducing BGP sessions from O(n²) to O(n). OpenPERouter now supports acting as a route reflector through `spec.routeReflector` and neighbors with `listenRange` and the `routeReflectorClient` property, see the [Route Reflector documentation](https://openperouter.github.io/openperouter/docs/configuration/route-reflector/). Not exercised yet by this PoC.
 
 ### GCP IP Alias Automation
 
-The PoC requires manual configuration of GCP IP aliases to enable VTEP-to-VTEP communication through the VPN tunnel.
+The PoC requires configuring GCP IP aliases to enable VTEP-to-VTEP communication through the VPN tunnel. The VTEP addresses are now deterministic (tunnel endpoint pool + node index) rather than dynamically leased, so the aliases can be computed ahead of time, as `gcp/vtep.sh` does.
 
 **Improvement**: Develop an OpenPERouter GCP controller that automatically manages IP aliases based on cluster state.
 
@@ -1124,7 +1144,7 @@ KubeVirt's `virt-synchronization-controller` runs on control plane nodes by defa
 
 **Options**:
 
-1. **OpenPERouter node role aware multus config enhancement** ([PR #217](https://github.com/openperouter/openperouter/pull/217)): Implement enhancement to allow router pods to use different NADs depending on whether they run on control plane or worker nodes.
+1. **Node-scoped Underlays for the control plane**: Underlays carry a `nodeSelector` and embed their own CNI configuration, so control plane nodes could get an Underlay with an ipvlan interface on their NIC and join the overlay.
 
 2. **Relocate virt-synchronization-controller to workers**: Move the controller from control plane to worker nodes, adding placement configuration (e.g., custom PriorityClass) to prevent pod eviction.
 

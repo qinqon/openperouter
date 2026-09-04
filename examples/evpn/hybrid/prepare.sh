@@ -82,6 +82,9 @@ exchange_kubevirt_certificates() {
 # Provision dedicated migration network before KubeVirt CCLM activation
 setup_gcp() {
    ./gcp/openshift/install.sh
+   # The Underlays come first: the VTEP addresses setup.sh registers as GCP
+   # alias IPs are derived from the node index OpenPERouter annotates.
+   ./gcp/underlay.sh
    kubectl apply -f gcp/migration-l2vni.yaml -f gcp/migration-nad.yaml
    ./gcp/openshift/prepare.sh
    ./gcp/setup.sh
@@ -114,7 +117,6 @@ flatten_kubeconfig() {
 apply_demo_manifests() {
 	# Apply demo manifests
 	kubectl config use-context gcp
-	./gcp/underlay.sh
 	kubectl apply -f gcp/vni.yaml
 	# Wait for the br-hs-110 bridge to be detected by the bridge-marker
 	echo "Waiting for bridge br-hs-110 annotation on worker nodes..."

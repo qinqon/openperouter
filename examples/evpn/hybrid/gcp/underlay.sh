@@ -1,101 +1,104 @@
 #!/bin/bash
+#
+# Generates the per node Underlay resources of the GCP cluster.
+#
+# Each worker gets an ipvlan interface in L3 mode on top of br-ex, since GCP
+# rejects traffic sourced from MAC addresses other than the one of the VM NIC.
+# The tunnel endpoint (VTEP) address is derived by OpenPERouter from
+# tunnelEndpoint.cidrs and the node index, and placed on that ipvlan interface
+# (tunnelEndpoint.interfaceName) instead of the router loopback: in L3 mode
+# ipvlan only delivers incoming traffic to addresses assigned to the child
+# interface itself. GCP must route the address to the node, see setup.sh, which
+# registers it as an alias IP of the instance.
+#
+# The two workers peer with each other through their VTEP addresses and both
+# peer with the on-prem leaf reached through the HA VPN with eBGP multihop.
 
 set -xe
 
+CURRENT_PATH=$(dirname "$0")
 NAMESPACE="openperouter-system"
 ON_PREM_TOR_ADDRESS=10.250.1.3
 ON_PREM_TOR_ASN=64515
+ON_PREM_UNDERLAY_CIDR=10.250.1.0/24
+VTEP_CIDR=192.168.11.0/24
+NODE_DOMAIN=".c.ocpstrat-1278.internal"
 
-WORKER_NODES=$(oc get nodes --selector='node-role.kubernetes.io/worker' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep worker-c || true)
+source "${CURRENT_PATH}/vtep.sh"
+
+WORKER_NODES=$(kubectl get nodes --selector='node-role.kubernetes.io/worker' -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep worker-c || true)
 
 if [ -z "$WORKER_NODES" ]; then
     echo "ERROR: No worker-c nodes found"
     exit 1
 fi
 
-# Array to store instance info
 declare -A NODE_TO_IP
-
 for node in $WORKER_NODES; do
-
-    # Find router pod on this node
-    ROUTER_POD=$(oc get pods -n "$NAMESPACE" -l app=router --field-selector spec.nodeName="$node" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-    if [ -z "$ROUTER_POD" ]; then
-        echo "  WARNING: No router pod found on $node"
-        continue
-    fi
-
-    echo "  Router pod: $ROUTER_POD"
-
-    ROUTER_IP=$(oc get pod "$ROUTER_POD" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}' 2>/dev/null | jq -r '.[] | select(.name == "openperouter-system/underlay") | .ips[0]' 2>/dev/null || true)
-
-    if [ -z "$ROUTER_IP" ]; then
-        echo "  WARNING: No underlay IP found on $ROUTER_POD"
-        continue
-    fi
-
-    # Extract short node name for GCP instance lookup
-    SHORT_NODE=$(echo "$node" | sed 's/\.c\.ocpstrat-1278\.internal$//')
-
-    # Store mapping
-    NODE_TO_IP["$SHORT_NODE"]="$ROUTER_IP"
-
-    echo "  ✓ Mapped $SHORT_NODE -> $ROUTER_IP"
-    echo ""
+    vtep=$(vtep_ip_for_node "$node" "$VTEP_CIDR")
+    NODE_TO_IP["${node%$NODE_DOMAIN}"]="$vtep"
+    echo "  ✓ Mapped ${node%$NODE_DOMAIN} -> $vtep"
 done
 
-if [ ${#NODE_TO_IP[@]} -eq 0 ]; then
-    echo "ERROR: No valid router pod IPs found"
+SORTED_NODES=($(printf '%s\n' "${!NODE_TO_IP[@]}" | sort))
+if [ ${#SORTED_NODES[@]} -ne 2 ]; then
+    echo "ERROR: expected 2 worker-c nodes, got ${#SORTED_NODES[@]}"
     exit 1
 fi
 
-# Generate underlay BGP mesh YAML
-echo "==================================="
-echo "Generating underlay BGP mesh YAML..."
-echo "==================================="
-
-# Sort nodes to ensure consistent ordering
-SORTED_NODES=($(printf '%s\n' "${!NODE_TO_IP[@]}" | sort))
-
-# Generate YAML file
-kubectl apply -f - <<EOF
+underlay() {
+    local node=$1
+    local asn=$2
+    local peer_ip=$3
+    local peer_asn=$4
+    cat <<EOF
 ---
-apiVersion: openpe.openperouter.github.io/v1alpha1
+apiVersion: network.openperouter.io/v1alpha1
 kind: Underlay
 metadata:
-  name: ${SORTED_NODES[0]}
-  namespace: openperouter-system
+  name: ${node}
+  namespace: ${NAMESPACE}
 spec:
-  asn: 65001
-  evpn:
-    vtepInterface: net1
+  asn: ${asn}
   nodeSelector:
     matchLabels:
-      kubernetes.io/hostname: ${SORTED_NODES[0]}.c.ocpstrat-1278.internal
+      kubernetes.io/hostname: ${node}${NODE_DOMAIN}
+  tunnelEndpoint:
+    interfaceName: net1
+    cidrs:
+    - ${VTEP_CIDR}
+  interfaces:
+    - type: CNIDevice
+      cniDevice:
+        type: RawConfig
+        interfaceName: net1
+        rawConfig:
+          cniVersion: "1.0.0"
+          name: ipvlan-underlay
+          plugins:
+            - type: ipvlan
+              master: br-ex
+              mode: l3
+              capabilities:
+                ips: true
+              ipam:
+                type: static
+                routes:
+                  - dst: ${ON_PREM_UNDERLAY_CIDR}
+                  - dst: ${VTEP_CIDR}
   neighbors:
-    - asn: 65002
-      address: ${NODE_TO_IP[${SORTED_NODES[1]}]}
+    - asn: ${peer_asn}
+      address: ${peer_ip}
     - asn: ${ON_PREM_TOR_ASN}
       address: ${ON_PREM_TOR_ADDRESS}
-      ebgpMultiHop: true
----
-apiVersion: openpe.openperouter.github.io/v1alpha1
-kind: Underlay
-metadata:
-  name: ${SORTED_NODES[1]}
-  namespace: openperouter-system
-spec:
-  asn: 65002
-  evpn:
-    vtepInterface: net1
-  nodeSelector:
-    matchLabels:
-      kubernetes.io/hostname: ${SORTED_NODES[1]}.c.ocpstrat-1278.internal
-  neighbors:
-    - asn: 65001
-      address: ${NODE_TO_IP[${SORTED_NODES[0]}]}
-    - asn: ${ON_PREM_TOR_ASN}
-      address: ${ON_PREM_TOR_ADDRESS}
-      ebgpMultiHop: true
+      properties:
+        - type: ebgpMultiHop
+          ebgpMultiHop:
+            ttl: 10
 EOF
+}
+
+{
+    underlay "${SORTED_NODES[0]}" 65001 "${NODE_TO_IP[${SORTED_NODES[1]}]}" 65002
+    underlay "${SORTED_NODES[1]}" 65002 "${NODE_TO_IP[${SORTED_NODES[0]}]}" 65001
+} | kubectl apply -f -

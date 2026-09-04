@@ -298,7 +298,8 @@ build-frr-vpn-image: ## Build FRR+VPN Docker image for hybrid topology
 .PHONY: deploy-hybrid
 deploy-hybrid: export CLAB_TOPOLOGY_FILE=hybrid/kind.clab.yml
 deploy-hybrid: export IP_MAP_FILE=hybrid/ip_map.txt
-deploy-hybrid: build-frr-vpn-image kind deploy-cluster deploy-controller
+deploy-hybrid: export KIND_WORKERS=1
+deploy-hybrid: build-frr-vpn-image kind deploy-cluster deploy-controller ## Deploy the on-prem side of the hybrid on-prem/GCP topology
 	@echo '=== Hybrid topology deployed ==='
 	@echo 'To use the cluster:'
 	@echo 'export KUBECONFIG=$(KUBECONFIG_PATH)'

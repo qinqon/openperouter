@@ -1,8 +1,6 @@
 openperouter:
   runOnMaster: false
   logLevel: debug
-  multusNetworkAnnotation:
-      '[{ "name": "underlay", "namespace": "openperouter-system" }]'
   cri: crio
   image:
     tag: gcp
