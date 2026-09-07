@@ -50,3 +50,7 @@ clab/hybrid/clab-kind/
 *secret*.yaml
 *secret*.yml
 *.bak
+
+# GCP PoC cluster secrets (never commit)
+cluster-dirs/
+*-data.zip

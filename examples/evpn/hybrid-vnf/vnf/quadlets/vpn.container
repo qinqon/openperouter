@@ -1,0 +1,40 @@
+# vpn.container
+# strongSwan IPsec VPN sidecar for the on-prem OpenPERouter VNF
+#
+# Runs in the same "perouter" network namespace as FRR (Pod=routerpod.pod), so
+# the IPsec tunnel to the GCP Cloud VPN and the EVPN VTEP/BGP share the same
+# routing table. This mimics an on-prem router/VNF terminating a cloud VPN.
+
+[Unit]
+Description=OpenPERouter VNF strongSwan VPN Container
+Documentation=https://github.com/openperouter
+# Start after FRR so the netns and datapath exist.
+After=frr.service
+Wants=frr.service
+
+[Container]
+# Built locally from Dockerfile.vpn (see deploy.sh).
+Image=localhost/openpe-vnf-vpn:latest
+
+# Share the router pod's "perouter" netns with FRR.
+Pod=routerpod.pod
+
+ContainerName=vpn
+
+# strongSwan needs to manage xfrm state/policies and interfaces.
+AddCapability=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+
+# The VPN parameters come from /etc/openpe-vnf/vpn.env on the host, populated
+# from network.env by deploy.sh.
+EnvironmentFile=/etc/openpe-vnf/vpn.env
+
+# start-vpn.sh renders /etc/swanctl/conf.d and loads the connection.
+Volume=/etc/openpe-vnf/start-vpn.sh:/usr/local/bin/start-vpn.sh:Z
+Entrypoint=/usr/local/bin/start-vpn.sh
+
+[Service]
+Restart=on-failure
+TimeoutStopSec=70
+
+[Install]
+WantedBy=default.target

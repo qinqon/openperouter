@@ -1,0 +1,64 @@
+# controller.container
+# OpenPERouter controller for the on-prem VNF, host mode, static config only.
+#
+# Unlike the Kubernetes-integrated systemd deployment, this controller runs
+# with NO kubeconfig and NO hostbridge: it reads the static configuration from
+# /var/lib/openperouter (node-config.yaml + configs/openpe_*.yaml) and keeps
+# the datapath reconciled from it. It logs "continue with static config only"
+# because there is no Kubernetes API to reach, which is expected.
+
+[Unit]
+Description=OpenPERouter VNF Controller Container (host mode, static config)
+Documentation=https://github.com/openperouter
+
+[Container]
+Image=quay.io/openperouter/router:main
+
+Pod=controllerpod.pod
+
+ContainerName=controller
+
+AddCapability=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+
+Network=host
+
+# Network namespaces - for moving the underlay NIC into the perouter netns.
+Volume=/run/netns:/run/netns:rshared
+
+# FRR configuration - controller writes config, reloader reads.
+Volume=/etc/perouter/frr:/etc/perouter/frr:rshared
+
+# Static configuration - node-config.yaml and configs/openpe_*.yaml (read-only).
+Volume=/var/lib/openperouter:/etc/openperouter:ro
+
+# System DBus socket - to restart the router pod on netns rebuilds.
+Volume=/run/dbus/system_bus_socket:/host/dbus/system_bus_socket:rw
+
+# CNI result cache - persistent across restarts (unused with NetworkDevice,
+# kept so the invoker initializes cleanly).
+Volume=/var/lib/openperouter/cni/cache:/var/lib/openperouter/cni/cache:rw
+
+PodmanArgs=--privileged
+PodmanArgs=--pid=host
+PodmanArgs=--uts=host
+
+# Host mode, static config. No --namespace k8s dependency is required for the
+# static reconciler; it is passed only for the resource labels.
+Exec=--frrconfig /etc/perouter/frr/frr.conf --pid-path /etc/perouter/frr/frr.pid --reloader-socket /etc/perouter/frr/frr.socket --mode host --namespace openperouter-system --cni-plugin-dirs=/opt/openperouter/cni/bin/ --cni-cache-dir=/var/lib/openperouter/cni/cache
+
+HealthCmd=wget -qO- http://127.0.0.1:9081/healthz || exit 1
+HealthInterval=20s
+HealthTimeout=5s
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+Restart=on-failure
+TimeoutStopSec=70
+
+ExecStartPre=/usr/bin/mkdir -p /etc/perouter/frr
+ExecStartPre=/usr/bin/mkdir -p /var/lib/openperouter
+ExecStartPre=/usr/bin/mkdir -p /var/lib/openperouter/cni/cache
+
+[Install]
+WantedBy=default.target

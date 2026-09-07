@@ -1,0 +1,45 @@
+# Static configuration for the on-prem OpenPERouter VNF (systemd/host mode).
+#
+# Topology:
+#   this VNF (ASN 64514, VTEP 100.65.0.0/24 on the underlay NIC)
+#     --- IPsec/Cloud VPN --->  GCP route reflector VTEP 10.0.200.1 (ASN 65001)
+#   A single L2VNI (vni 110) is stretched to the GCP L2VNI of the same vni.
+#   Its host side is an EXTERNAL Linux bridge (br-vlan) into which the operator
+#   plugs the workload VLAN (see vlan-setup.sh). Pure east-west L2, no gateway.
+#
+# The underlay interface is a NetworkDevice: the named host NIC is moved into
+# the "perouter" netns and used as the VTEP source / VPN egress. Replace
+# "eth1" below with the laptop uplink reserved for the VNF (max 15 chars); it
+# is consumed by the host and cannot be used by the host OS afterwards, so use
+# a spare NIC / USB-eth / dedicated VLAN subinterface.
+underlays:
+  - name: onprem
+    asn: 64514
+    tunnelEndpoint:
+      cidrs:
+        - 100.65.0.0/24
+    interfaces:
+      - type: NetworkDevice
+        networkDevice:
+          interfaceName: eth1
+    neighbors:
+      # eBGP multihop to the GCP route reflector's VTEP, reached over the VPN.
+      # The RR reflects the workers' ipv4-unicast (VTEP reachability) and EVPN
+      # routes, so this single session is enough to learn every GCP VTEP.
+      - asn: 65001
+        address: 10.0.200.1
+        properties:
+          - type: ebgpMultiHop
+            ebgpMultiHop:
+              ttl: 10
+l2vnis:
+  - name: vlan-stretch
+    vni: 110
+    vxlanPort: 4789
+    hostMaster:
+      type: LinuxBridge
+      linuxBridge:
+        # External: the bridge is created by vlan-setup.sh and carries the
+        # workload VLAN subinterface. OpenPERouter only attaches the EVPN veth.
+        name: br-vlan
+        lifecycle: External

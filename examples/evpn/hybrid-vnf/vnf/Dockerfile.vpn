@@ -1,0 +1,18 @@
+# strongSwan IPsec sidecar for the on-prem OpenPERouter VNF.
+#
+# Runs in the router pod's "perouter" network namespace and terminates the
+# policy-based IPsec tunnel to the GCP Cloud VPN gateway. Kept as a separate,
+# minimal image so the upstream openperouter/router image stays untouched.
+FROM alpine:3.20
+
+RUN apk add --no-cache \
+    strongswan \
+    iproute2 \
+    iptables \
+    bind-tools \
+    tcpdump \
+    bash
+
+RUN mkdir -p /etc/swanctl/conf.d /var/log
+
+ENTRYPOINT ["/usr/local/bin/start-vpn.sh"]

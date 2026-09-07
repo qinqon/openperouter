@@ -1,0 +1,4 @@
+openperouter:
+  runOnMaster: false
+  logLevel: debug
+  cri: crio
