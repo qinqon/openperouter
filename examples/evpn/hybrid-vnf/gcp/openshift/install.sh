@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHART_DIR="${SCRIPT_DIR}/../../../../charts/openperouter"
+CHART_DIR="${SCRIPT_DIR}/../../../../../charts/openperouter"
 
 helm uninstall --ignore-not-found openperouter -n openperouter-system 2>/dev/null || true
 helm install openperouter "${CHART_DIR}" \

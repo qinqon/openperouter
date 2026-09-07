@@ -1,4 +1,15 @@
 openperouter:
-  runOnMaster: false
   logLevel: debug
   cri: crio
+  # Router/controller/reloader/nodemarker all use this single image (the chart
+  # has no separate image for the FRR container). Built from this branch,
+  # which carries the tunnelEndpoint.interfaceName (ipvlan-L3 CNIDevice VTEP)
+  # support the GCP underlay in this example depends on.
+  image:
+    repository: quay.io/ellorent/router
+    tag: vlan-evpn-gcp
+    pullPolicy: Always
+  # Keep the router/controller pods off the control plane. The chart's default
+  # tolerations still allow scheduling there, so pin them to workers instead.
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
