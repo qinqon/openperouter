@@ -46,72 +46,80 @@ than the VLAN-tagging mechanics were.
 |   .200/24    |            |   (untagged,   |            | vnf-nic.100 |
 |  (plain, no  |            |    PVID 100)   |            | (strips the |
 | VLAN aware-  |-- plain -->|                | vlan 100 ->| 802.1Q tag) |
-| ness at all) |            | sw-trunk-port  |            +-------------+
-+--------------+            |    (tagged,    |
+| ness at all) |            | sw-trunk-port  |            |   mtu 1450  |
++--------------+            |    (tagged,    |            +-------------+
                             |    vlan 100)   |
                             +----------------+
 
                                                                  |
                                                                  v
-                                                            +---------+
-                                                            | br-vlan |
-                                                            +---------+
+                                                           +----------+
+                                                           | br-vlan  |
+                                                           | mtu 1450 |
+                                                           +----------+
 
          |
          v
-+-----------------------------------------------------------------+
-|netns "perouter" (FRR + strongSwan + VXLAN share one routing table)|
-|                                                                 |
-| +------------+    +----------+    +-----------+    +----------+ |
-| | host-e-110 |----|  vni110  |----| br-pe-110 |----| pe-e-110 | |
-| +------------+    | (VXLAN,  |    +-----------+    +----------+ |
-|                   | vni 110) |                                  |
-|                   +----------+                                  |
-|                                                                 |
-|                         |                                       |
-|                         v                                       |
-|                 +---------------+                               |
-|                 |       lo      |                               |
-|                 | 100.65.0.0/32 |                               |
-|                 +---------------+                               |
-|                                                                 |
-| +----------+   +-------------+   +-----------+                  |
-| |   FRR    |---|  strongSwan |---|  macvlan0 |                  |
-| | AS 64514 |   | (IPsec/VPN) |   | (underlay |                  |
-| +----------+   +-------------+   |   uplink) |                  |
-|                                  +-----------+                  |
-+-----------------------------------------------------------------+
++----------------------------------------------------------------------+
+| netns "perouter" (FRR + strongSwan + VXLAN share one routing table)  |
+|                                                                      |
+| +------------+    +----------+    +-----------+    +----------+      |
+| | host-e-110 |----|  vni110  |----| br-pe-110 |----| pe-e-110 |      |
+| +------------+    | (VXLAN,  |    +-----------+    +----------+      |
+|                   | vni 110) |                                       |
+|                   +----------+                                       |
+| ^ all 4 above: mtu 1450 (auto-derived: macvlan0 mtu 1500 - 50 VXLAN) |
+|                                                                      |
+|                         |                                            |
+|                         v                                            |
+|                 +---------------+                                    |
+|                 |       lo      |                                    |
+|                 | 100.65.0.0/32 |                                    |
+|                 +---------------+                                    |
+|                                                                      |
+| +----------+   +-------------+   +----------------+                  |
+| |   FRR    |---|  strongSwan |---|    macvlan0    |                  |
+| | AS 64514 |   | (IPsec/VPN) |   |   (underlay    |                  |
+| +----------+   +-------------+   |     uplink)    |                  |
+|                                  |    mtu 1500    |                  |
+|                                  | (kept full --  |                  |
+|                                  |  NOT reduced,  |                  |
+|                                  |  see MTU note) |                  |
+|                                  +----------------+                  |
++----------------------------------------------------------------------+
 
 --- DIAGRAM 2: cross-cloud -- on-prem VNF <-> GCP over the VPN ---
 
-+-----------------+                +-----------------------+
-|       FRR       |-- IPsec/VPN -->|   Cloud VPN Gateway   |
-|     AS 64514    |                |     35.222.55.173     |
-| VTEP 100.65.0.0 |                | terminates IPsec here |
-+-----------------+                +-----------------------+
++-------------------+                +-----------------------+
+|        FRR        |-- IPsec/VPN -->|   Cloud VPN Gateway   |
+|      AS 64514     |                |     35.222.55.173     |
+|  VTEP 100.65.0.0  |                | terminates IPsec here |
+| underlay mtu 1500 |                |    (+ESP overhead)    |
++-------------------+                +-----------------------+
 
-                                               VPC route
-                                               |
-                                               v
-                               +-------------------------------+
-                               |          master-0/1/2         |
-                               |   route reflectors, AS 65001  |
-                               |    GCP_RR_CIDR 10.0.1.0/24    |
-                               | ipvlan net1, mtu 1430, no VNI |
-                               +-------------------------------+
+                                                 VPC route
+                                                 |
+                                                 v
+                                 +-------------------------------+
+                                 |          master-0/1/2         |
+                                 |   route reflectors, AS 65001  |
+                                 |    GCP_RR_CIDR 10.0.1.0/24    |
+                                 | ipvlan net1: mtu 1430, no VNI |
+                                 +-------------------------------+
 
 iBGP route reflection
 (ipv4-unicast + evpn)
-                                               |
-                                               v
-                             +----------------------------------+
-                             |           worker-a/b/c           |
-                             |    EVPN data plane, AS 65001     |
-                             |   GCP_VTEP_CIDR 10.0.200.0/24    |
-                             |      ipvlan net1, mtu 1430       |
-                             |  L2VNI 110 -> br-hs-110 -> pod   |
-                             | pod vlan-workload 192.168.100.10 |
-                             +----------------------------------+
+                                                 |
+                                                 v
+                         +----------------------------------------------+
+                         |                 worker-a/b/c                 |
+                         |          EVPN data plane, AS 65001           |
+                         |         GCP_VTEP_CIDR 10.0.200.0/24          |
+                         |            ipvlan net1: mtu 1430             |
+                         |   veth/br-hs-110: mtu 1380 (auto: 1430-50)   |
+                         | pod NAD net1: mtu 1380 (explicit, unmanaged) |
+                         |       pod vlan-workload 192.168.100.10       |
+                         +----------------------------------------------+
 
 Logical BGP/EVPN relationships (both ride over the IPsec tunnel + VPC
 route shown in diagram 2, not separate physical links):
@@ -123,6 +131,29 @@ route shown in diagram 2, not separate physical links):
 Shared L2 segment: L2VNI 110, subnet 192.168.100.0/24
   ext-host <-802.1Q-> switch <-untag-> vnf-nic.100 <-> br-vlan <-> perouter
       <--IPsec/VPN--> Cloud VPN GW --VPC--> worker VTEP <-> br-hs-110 <-> pod
+
+MTU chain -- measured safe end-to-end size: 1380 bytes (IP-layer).
+OpenPERouter auto-derives each L2VNI veth as (underlay iface mtu) - 50
+(VXLAN overhead); it reads the underlay's mtu but never writes it, so
+that interface is the one correct, reconcile-safe place to also account
+for IPsec -- but ONLY where that interface does not itself carry IPsec:
+
+  GCP (static fix, safe):  net1 mtu 1430 --auto--> veth/pod mtu 1380
+    worker VM's kernel never does IPsec (Cloud VPN gateway terminates
+    it), so net1 only ever carries plain VXLAN -- shrinking it is safe.
+    The pod's own NAD interface is a separate, OpenPERouter-unmanaged
+    veth and needs its OWN explicit mtu 1380, or it silently keeps 1500.
+
+  on-prem (dynamic, NOT a static fix): macvlan0 mtu 1500 (unchanged)
+    --auto--> veth/br-vlan mtu 1450 (VXLAN-only aware)
+    macvlan0 is ALSO the interface strongSwan's ESP output must fit
+    through (perouter's netns is shared by VXLAN and the VPN sidecar).
+    Shrinking it double-counts IPsec overhead and starves ESP's own
+    transmission budget -- tried and measured making this WORSE (1316
+    instead of 1380), not better. The 1450->1380 gap here is instead
+    closed by the kernel's own dynamic path-MTU discovery (ICMP
+    'Frag needed', already handled transparently by XFRM), which is
+    what was actually measured working correctly end-to-end.
 ```
 
 - OpenPERouter runs on **every** OpenShift node. The 3 control-plane nodes are
