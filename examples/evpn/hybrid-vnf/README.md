@@ -39,19 +39,90 @@ NIC/driver and a real switch), which is a much smaller, lower-risk gap
 than the VLAN-tagging mechanics were.
 
 ```
-        ON-PREM (laptop)                     GCP OpenShift (ellorent-vlan-evpn)
-  ┌──────────────────────────┐    ┌──────────────────────────────────────────────────┐
-  │ OpenPERouter VNF (systemd)│    │ master-0/1/2 (route reflectors, ASN 65001)        │
-  │  FRR + reloader+strongSwan│    │   ipvlan-l3 net1 on br-ex, GCP_RR_CIDR (10.0.1.0/24)│
-  │  netns "perouter"         │    │   no VNIs, no tunnelEndpoint... well, they DO use │
-  │  VTEP 100.65.0.0/24       │    │   tunnelEndpoint (see "Why route reflectors...")  │
-  │  on the underlay NIC      │◄──IPsec Cloud──►                                       │
-  │  eBGP-multihop to all 3   │    VPN            worker-a/b/c (EVPN data plane)       │
-  │  RRs                      │    │   ipvlan-l3 net1 on br-ex, GCP_VTEP_CIDR (10.0.200.0/24)│
-  │  L2VNI 110 ── br-vlan ────┤    │   statically peer all 3 RRs                       │
-  └──────────────────────────┼┘    │   L2VNI 110 ── br-hs-110 ── pod                   │
-                              │    └──────────────────────────────────────────────────┘
-                     workload VLAN
+--- DIAGRAM 1: on-prem -- real 802.1Q VLAN simulation feeding the VNF ---
+
++--------------+            +----------------+            +-------------+
+|   host-nic   |            | sw-access-port |            |   vnf-nic   |
+|   .200/24    |            |   (untagged,   |            | vnf-nic.100 |
+|  (plain, no  |            |    PVID 100)   |            | (strips the |
+| VLAN aware-  |-- plain -->|                | vlan 100 ->| 802.1Q tag) |
+| ness at all) |            | sw-trunk-port  |            +-------------+
++--------------+            |    (tagged,    |
+                            |    vlan 100)   |
+                            +----------------+
+
+                                                                 |
+                                                                 v
+                                                            +---------+
+                                                            | br-vlan |
+                                                            +---------+
+
+         |
+         v
++-----------------------------------------------------------------+
+|netns "perouter" (FRR + strongSwan + VXLAN share one routing table)|
+|                                                                 |
+| +------------+    +----------+    +-----------+    +----------+ |
+| | host-e-110 |----|  vni110  |----| br-pe-110 |----| pe-e-110 | |
+| +------------+    | (VXLAN,  |    +-----------+    +----------+ |
+|                   | vni 110) |                                  |
+|                   +----------+                                  |
+|                                                                 |
+|                         |                                       |
+|                         v                                       |
+|                 +---------------+                               |
+|                 |       lo      |                               |
+|                 | 100.65.0.0/32 |                               |
+|                 +---------------+                               |
+|                                                                 |
+| +----------+   +-------------+   +-----------+                  |
+| |   FRR    |---|  strongSwan |---|  macvlan0 |                  |
+| | AS 64514 |   | (IPsec/VPN) |   | (underlay |                  |
+| +----------+   +-------------+   |   uplink) |                  |
+|                                  +-----------+                  |
++-----------------------------------------------------------------+
+
+--- DIAGRAM 2: cross-cloud -- on-prem VNF <-> GCP over the VPN ---
+
++-----------------+                +-----------------------+
+|       FRR       |-- IPsec/VPN -->|   Cloud VPN Gateway   |
+|     AS 64514    |                |     35.222.55.173     |
+| VTEP 100.65.0.0 |                | terminates IPsec here |
++-----------------+                +-----------------------+
+
+                                               VPC route
+                                               |
+                                               v
+                               +-------------------------------+
+                               |          master-0/1/2         |
+                               |   route reflectors, AS 65001  |
+                               |    GCP_RR_CIDR 10.0.1.0/24    |
+                               | ipvlan net1, mtu 1430, no VNI |
+                               +-------------------------------+
+
+iBGP route reflection
+(ipv4-unicast + evpn)
+                                               |
+                                               v
+                             +----------------------------------+
+                             |           worker-a/b/c           |
+                             |    EVPN data plane, AS 65001     |
+                             |   GCP_VTEP_CIDR 10.0.200.0/24    |
+                             |      ipvlan net1, mtu 1430       |
+                             |  L2VNI 110 -> br-hs-110 -> pod   |
+                             | pod vlan-workload 192.168.100.10 |
+                             +----------------------------------+
+
+Logical BGP/EVPN relationships (both ride over the IPsec tunnel + VPC
+route shown in diagram 2, not separate physical links):
+  - on-prem VNF (AS 64514) <--eBGP-multihop(ttl 10)--> route reflectors (AS 65001)
+  - on-prem VNF (AS 64514) <----EVPN VXLAN data plane (direct)----> workers
+    route reflection rewrites the ipv4-unicast next-hop, never the EVPN
+    next-hop, so VXLAN data-plane traffic never actually transits the RRs
+
+Shared L2 segment: L2VNI 110, subnet 192.168.100.0/24
+  ext-host <-802.1Q-> switch <-untag-> vnf-nic.100 <-> br-vlan <-> perouter
+      <--IPsec/VPN--> Cloud VPN GW --VPC--> worker VTEP <-> br-hs-110 <-> pod
 ```
 
 - OpenPERouter runs on **every** OpenShift node. The 3 control-plane nodes are
