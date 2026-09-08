@@ -11,6 +11,11 @@
 #   SHARED_SECRET     IPsec pre-shared key
 #   VNF_VTEP_CIDR     on-prem VTEP pool advertised into the tunnel (100.65.0.0/24)
 #   GCP_VTEP_CIDR     GCP VTEP pool reached over the tunnel (10.0.200.0/24)
+#   GCP_RR_CIDR       GCP route-reflector pool reached over the tunnel
+#                     (10.0.1.0/24) -- needed for the on-prem BGP sessions;
+#                     must match the GCP-side local-traffic-selector set by
+#                     setup-cloudvpn.sh, or the CHILD_SA negotiation fails
+#                     with TS_UNACCEPTABLE even though IKE_SA succeeds.
 set -euo pipefail
 
 : "${GCP_VPN_IP:?GCP_VPN_IP is required}"
@@ -18,18 +23,24 @@ set -euo pipefail
 : "${SHARED_SECRET:?SHARED_SECRET is required}"
 VNF_VTEP_CIDR="${VNF_VTEP_CIDR:-100.65.0.0/24}"
 GCP_VTEP_CIDR="${GCP_VTEP_CIDR:-10.0.200.0/24}"
+GCP_RR_CIDR="${GCP_RR_CIDR:-10.0.1.0/24}"
 
 echo "=== OpenPERouter VNF VPN ==="
 echo "  local (on-prem):  ${ONPREM_PUBLIC_IP}"
 echo "  remote (GCP):     ${GCP_VPN_IP}"
 echo "  local  TS:        ${VNF_VTEP_CIDR}"
-echo "  remote TS:        ${GCP_VTEP_CIDR}"
+echo "  remote TS:        ${GCP_VTEP_CIDR},${GCP_RR_CIDR}"
 
 cat > /etc/swanctl/conf.d/gcp.conf <<EOF
 connections {
     gcp-vpn {
         version = 2
-        local_addrs  = %defaultroute
+        # %any: let charon pick the source address via routing to
+        # remote_addrs (swanctl.conf/vici equivalent of the legacy
+        # ipsec.conf/starter "%defaultroute" keyword, which is NOT valid
+        # here and silently fails as "Name does not resolve" since charon
+        # tries to resolve it as a literal hostname).
+        local_addrs  = %any
         remote_addrs = ${GCP_VPN_IP}
         mobike = yes
 
@@ -44,9 +55,12 @@ connections {
 
         children {
             gcp-vpn {
-                # Policy-based selectors: only VTEP-to-VTEP traffic is tunneled.
+                # Policy-based selectors: only VTEP-to-VTEP traffic is
+                # tunneled. Both GCP pools are required: the worker VTEPs
+                # (EVPN/VXLAN data plane) and the route reflectors (BGP
+                # control plane) -- must match GCP's local-traffic-selector.
                 local_ts  = ${VNF_VTEP_CIDR}
-                remote_ts = ${GCP_VTEP_CIDR}
+                remote_ts = ${GCP_VTEP_CIDR},${GCP_RR_CIDR}
                 esp_proposals = aes256gcm16-sha256-modp2048,aes256-sha256-modp2048
                 dpd_action = restart
                 start_action = start
@@ -58,7 +72,13 @@ connections {
         dpd_delay = 10s
         dpd_timeout = 30s
         keyingtries = 0
-        unique = never
+        # replace (not the default "never"): both sides have start_action =
+        # start and can each initiate, which races and briefly establishes
+        # two independent IKE_SAs to the same peer id after the tunnel has
+        # been idle for a while (observed live against GCP Classic VPN).
+        # "replace" makes a new IKE_SA from the same peer supersede the old
+        # one instead of leaving duplicates installed indefinitely.
+        unique = replace
         rekey_time = 36000s
     }
 }

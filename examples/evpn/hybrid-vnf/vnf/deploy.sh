@@ -67,6 +67,7 @@ ONPREM_PUBLIC_IP=${ONPREM_PUBLIC_IP}
 SHARED_SECRET=${SHARED_SECRET}
 VNF_VTEP_CIDR=${VNF_VTEP_CIDR:-100.65.0.0/24}
 GCP_VTEP_CIDR=${GCP_VTEP_CIDR:-10.0.200.0/24}
+GCP_RR_CIDR=${GCP_RR_CIDR:-10.0.1.0/24}
 EOF
 chmod 0600 /etc/openpe-vnf/vpn.env
 install -m 0755 "${SCRIPT_DIR}/start-vpn.sh" /etc/openpe-vnf/start-vpn.sh
