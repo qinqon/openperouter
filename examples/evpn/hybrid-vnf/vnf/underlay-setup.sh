@@ -19,6 +19,33 @@
 # Do not run this while VPN/deploy.sh services are already using
 # ${MACVLAN_NAME} -- undeploy.sh first, or use a different name.
 #
+# MTU: deliberately NOT reduced here, unlike the equivalent GCP-side
+# interface (gcp/underlay.sh's ipvlan mtu: 1430). On GCP, net1 only carries
+# plain VXLAN -- the IPsec tunnel is terminated entirely by the managed
+# Cloud VPN gateway, never by the worker VM's own kernel -- so shrinking it
+# to account for VPN overhead is safe. On-prem, this SAME macvlan interface
+# is both what OpenPERouter reads for its automatic (underlay MTU - 50)
+# veth-MTU calculation, AND the actual interface strongSwan's ESP output
+# must fit through, since perouter's netns is shared between FRR/VXLAN and
+# the VPN sidecar. Shrinking it double-counts the IPsec overhead: it starves
+# ESP's own transmission budget (ESP needs the interface's FULL real
+# capacity to fit an already-VXLAN-sized packet plus its own ~70 bytes of
+# overhead), producing a SMALLER effective MTU than intended, not a
+# correctly-sized one (measured concretely as 1316, not the intended 1380,
+# when this interface was set to 1430) -- worse than doing nothing.
+# Leaving this interface at its real capacity means the on-prem veth/bridge
+# chain (br-vlan, pe-e-110, host-e-110) is left at its VXLAN-only-aware
+# value (underlay MTU - 50, e.g. 1450) and relies on the kernel's own
+# dynamic path-MTU discovery (ICMP "Frag needed", already handled
+# transparently by XFRM's own ESP output path) to protect any packet
+# actually sized above what the tunnel can carry -- which is exactly what
+# was already measured working end-to-end (see the README's MTU gotcha)
+# before any interface-level MTU was touched. The trade-off: this relies on
+# ICMP working end-to-end for oversized packets, same as any PMTU-discovery
+# setup; if that is ever unreliable on a given path, the fix is an
+# architectural one (a dedicated, VPN-only netns/interface separate from
+# perouter), not a smaller number here.
+#
 # Usage:
 #   UNDERLAY_NIC=enp9s0u2u1u2 UNDERLAY_IP=192.168.1.163/24 \
 #     UNDERLAY_GW=192.168.1.1 ./underlay-setup.sh
@@ -49,3 +76,4 @@ echo "deploy.sh. The move into perouter preserves this address but not a"
 echo "default route -- once deploy.sh has run (perouter exists), add one:"
 echo "  ip netns exec perouter ip route add default via ${UNDERLAY_GW} dev ${MACVLAN_NAME}"
 ip -br addr show "${MACVLAN_NAME}"
+ip -d link show "${MACVLAN_NAME}" | grep -o 'mtu [0-9]*'

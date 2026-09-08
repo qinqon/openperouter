@@ -55,6 +55,30 @@ PY
 # br-ex with the derived tunnel endpoint address injected through the ips
 # capability, and routes to every other pool so return traffic finds its way
 # back out through it.
+#
+# mtu: OpenPERouter derives the L2VNI veth MTU as (this interface's own MTU)
+# - 50 (VXLAN overhead) -- it reads net1's MTU but never writes it, so this
+# is the correct, reconcile-safe place to statically account for the
+# on-prem VPN's extra IPsec overhead, which the controller has no way to
+# see (only workers host the L2VNI, but this same function also renders the
+# reflectors' net1, where an explicit MTU is harmless: they host no VNI, so
+# nothing derives from it, and BGP's TCP sessions clamp their own MSS
+# regardless). br-ex's/the node's real NIC MTU on this cluster is 1460 (GCE
+# default), not 1500 -- 1430 is chosen to land on the same 1380 veth MTU
+# target as the on-prem side, not because 1430 is itself meaningful.
+#
+# This static reduction is safe on GCP specifically because the worker
+# VM's own kernel never does IPsec -- the tunnel is terminated entirely by
+# the managed Cloud VPN gateway -- so net1 only ever carries plain VXLAN.
+# The on-prem side CANNOT do the equivalent static reduction on its own
+# underlay interface: there, the same interface also carries the ESP
+# output itself (perouter's netns is shared between FRR/VXLAN and the VPN
+# sidecar), so shrinking it there starves ESP's own transmission budget
+# instead of correctly sizing the VXLAN payload, and produces a *smaller*
+# effective MTU than intended, not a correctly-sized one. The on-prem side
+# instead relies on the kernel's own dynamic path-MTU discovery to protect
+# oversized packets -- see vnf/underlay-setup.sh and the README's MTU
+# gotcha for the full explanation and how 1380 was measured.
 ipvlan_underlay() {
     local name=$1
     cat <<EOF
@@ -70,6 +94,7 @@ ipvlan_underlay() {
             - type: ipvlan
               master: br-ex
               mode: l3
+              mtu: 1430
               capabilities:
                 ips: true
               ipam:

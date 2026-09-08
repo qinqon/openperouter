@@ -285,6 +285,49 @@ oc delete namespace openperouter-system
   failure mode only shows up if you instead try to give the VPN container its
   own ordinary container-engine network (podman/Docker default bridge) for
   its uplink.
+- **MTU: VXLAN and IPsec overhead both need accounting for, and not the
+  same way on each side.** OpenPERouter automatically sizes the L2VNI's
+  veth pair as (underlay interface's own MTU) − 50 (VXLAN overhead) -- it
+  reads the underlay interface's MTU but never writes it, so shrinking that
+  interface is the correct, reconcile-safe way to also account for
+  encapsulation the controller cannot see, like a VPN sitting underneath.
+  But this tunnel has an on-prem-specific complication: **do this on GCP's
+  `net1`, never on the on-prem `NetworkDevice` uplink.** On GCP the worker
+  VM's own kernel never does IPsec (the Cloud VPN gateway terminates it
+  entirely), so `net1` only ever carries plain VXLAN and shrinking it is
+  safe (`gcp/underlay.sh`'s `mtu: 1430`). On-prem, that same interface is
+  *also* the interface strongSwan's ESP output must physically fit through,
+  since perouter's netns is shared between FRR/VXLAN and the VPN sidecar --
+  shrinking it there starves ESP's own transmission budget instead of
+  correctly sizing the VXLAN payload, producing a *smaller* effective MTU
+  than intended (concretely measured: 1316 instead of the intended 1380,
+  when this mistake was made and then corrected during this PoC). The
+  on-prem side instead relies on the kernel's own dynamic path-MTU
+  discovery (already handled transparently by XFRM's ESP output path) to
+  protect oversized packets, and it already does, correctly, with the
+  interface at its normal, undiminished MTU.
+  - There is a second, unrelated gap: a pod's NAD-created interface (here,
+    `net1` via the bridge CNI plugin) is a completely separate veth pair
+    from OpenPERouter's own, entirely outside its reconcile loop, so it
+    keeps whatever MTU the NAD gives it (1500 by default) regardless of
+    what the rest of the L2 segment uses. Since one L2 broadcast domain
+    needs one uniform MTU (a GCP pod and the on-prem VNF can each send
+    frames to the other, not just receive them), this needs its own
+    explicit `"mtu": 1380` in the NAD config (`gcp/l2vni.yaml`) -- without
+    it, a pod is a live PMTU black-hole risk, not merely a cosmetic mismatch.
+  - **How 1380 was measured**: `ping -M do -s N` (or, since some `ping`
+    builds -- e.g. BusyBox in the test images used here -- don't support
+    `-M do`, any plain oversized `ping`) from a real workload on one side to
+    the other, increasing `N` until replies stop / a `Frag needed ... mtu =
+    M` ICMP appears; a `ping -s N` payload corresponds to an IP-layer size
+    of `N+28` (20-byte IP + 8-byte ICMP header). 1380 (IP-layer) was the
+    largest size that worked reliably, symmetric in both directions, for
+    this specific tunnel (AES-GCM-256, ESP-in-UDP/NAT-T) over this
+    laptop's physical path -- both the target number and which side can
+    safely apply it statically are specific to this setup; re-measure
+    rather than assuming they carry over to a different cipher suite,
+    network path, or an architecture where the VPN does *not* share a
+    netns with the VXLAN underlay.
 - **`local_addrs = %defaultroute` silently fails under swanctl/vici.**
   `%defaultroute` is a legacy `ipsec.conf`/`starter` keyword; loaded via
   `swanctl --load-all` it is not recognized, and charon tries to literally

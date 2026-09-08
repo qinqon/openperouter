@@ -26,6 +26,19 @@ spec:
 # Bridge NAD placing pods on the L2VNI host bridge (br-hs-110). Whereabouts
 # assigns addresses from the stretched L2 subnet; keep them out of the range
 # used by the on-prem VLAN host to avoid collisions.
+#
+# mtu: the bridge CNI plugin applies this to the pod-facing veth it creates.
+# This interface is entirely outside OpenPERouter's reconcile loop (only the
+# controller's OWN host-side veth into br-hs-110 gets the automatic
+# underlayMTU-50 treatment), so it needs its own explicit value, or a pod
+# would advertise MTU 1500 while every other interface on this L2 segment
+# is 1380 -- a classic silent MTU black hole (small packets, e.g. SSH,
+# work; anything larger, e.g. an HTTP response, hangs). 1380 matches the
+# on-prem side's *effective* MTU (see gcp/underlay.sh's ipvlan mtu: 1430,
+# and ../README.md's MTU gotcha for why the on-prem side reaches the same
+# 1380 dynamically instead of via a static interface MTU): one L2
+# broadcast domain needs one uniform MTU, even though pure worker-to-worker
+# VXLAN traffic on this cluster could otherwise tolerate more.
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
 metadata:
@@ -38,6 +51,7 @@ spec:
       "name": "vlan-stretch",
       "type": "bridge",
       "bridge": "br-hs-110",
+      "mtu": 1380,
       "ipam": {
         "type": "whereabouts",
         "range": "192.168.100.0/24",
