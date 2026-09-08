@@ -11,27 +11,32 @@ also terminates the VPN, so you can exercise the cloud-VPN overhead and the
 VLAN attachment without a second cluster.
 
 **Status: verified working end-to-end, laptop to GCP**, for everything this
-example is actually responsible for: IPsec tunnel established; all 3
-on-prem-to-RR eBGP sessions up (`ipv4-unicast` + `l2vpn evpn`); EVPN Type-3
-(VTEP) routes for all 3 GCP worker VTEPs visible on-prem via route
-reflection across the eBGP boundary; the on-prem VXLAN device came up with
-all 3 worker VTEPs as head-end-replication flood targets; genuine EVPN
-Type-2 (MAC) routes exchanged in both directions (not just VXLAN
-flood-and-learn); MTU correctly accounted for on both sides (see the MTU
-gotcha); and bidirectional 300KB TCP transfers between a real on-prem
-workload and the GCP pod completed with 0 bytes lost (MD5-verified) at
-realistic, everyday-file-size scale, not just small pings.
+example is responsible for, including genuine 802.1Q VLAN tag handling:
+IPsec tunnel established; all 3 on-prem-to-RR eBGP sessions up
+(`ipv4-unicast` + `l2vpn evpn`); EVPN Type-3 (VTEP) routes for all 3 GCP
+worker VTEPs visible on-prem via route reflection across the eBGP
+boundary; the on-prem VXLAN device came up with all 3 worker VTEPs as
+head-end-replication flood targets; genuine EVPN Type-2 (MAC) routes
+exchanged in both directions (not just VXLAN flood-and-learn); MTU
+correctly accounted for on both sides (see the MTU gotcha); and
+bidirectional 300KB TCP transfers between a real on-prem workload and the
+GCP pod completed with 0 bytes lost (MD5-verified) at realistic,
+everyday-file-size scale, not just small pings.
 
-**Not verified: actual 802.1Q VLAN tag processing.** The on-prem workload
-in this verified run is a plain veth attached directly to `br-vlan` (see
-the exact commands in "Test the stretch" below), not a device reached
-through a real VLAN-tagged switch port and `vlan-setup.sh`'s `.NNN`
-subinterface as the example otherwise describes -- that subinterface was
-created but never carried a single byte of the test traffic (confirmed via
-its own, untouched RX counter). Everything OpenPERouter itself is
-responsible for (bridging, EVPN, VXLAN, the VPN, MTU) is proven; the
-standard Linux `8021q`/switch-trunk mechanics this example's own
-instructions assume are not, since nothing in this run exercised them.
+An earlier version of this test used a plain veth attached directly to
+`br-vlan`, bypassing 802.1Q tag processing entirely -- real, but only of
+OpenPERouter's own bridging/EVPN/VXLAN path, not of the VLAN-tagging
+mechanics this example's own instructions assume. That gap is now closed:
+`sim-switch-setup.sh` builds a genuine VLAN-aware Linux bridge as a
+simulated switch (a real trunk port carrying tagged frames to the VNF, a
+real access port carrying plain untagged frames to an external host
+netns), so the same kernel 802.1Q code a physical switch and NIC would
+use is genuinely exercised -- confirmed directly with `tcpdump`: identical
+ICMP exchanges show `vlan 100` tags on the trunk port and no tag at all on
+the access port. See "Test the stretch" below for the full setup and
+results. What remains unverified is only physical hardware itself (a real
+NIC/driver and a real switch), which is a much smaller, lower-risk gap
+than the VLAN-tagging mechanics were.
 
 ```
         ON-PREM (laptop)                     GCP OpenShift (ellorent-vlan-evpn)
@@ -92,6 +97,9 @@ vnf/                     on-prem VNF (systemd/Podman, static config, no k8s)
   start-vpn.sh           strongSwan config + load (runs in perouter netns)
   underlay-setup.sh      create the macvlan underlay uplink (router side)
   vlan-setup.sh          create br-vlan + VLAN subinterface (workload side)
+  sim-switch-setup.sh    TEST-ONLY: simulate a real VLAN-trunked switch +
+                         external host, for exercising vlan-setup.sh's
+                         actual 802.1Q code path without physical hardware
   deploy.sh/undeploy.sh  install/remove quadlets and static config
   verify.sh              VPN/BGP/EVPN/datapath checks
 gcp/                     GCP OpenShift side (OpenPERouter in Kubernetes mode)
@@ -202,23 +210,30 @@ GCP pod `vlan-workload` gets an address from `192.168.100.0/24` on the NAD
 (`192.168.100.10` in the verified run). Give an on-prem host on the VLAN an
 address in the same subnet (avoid `.10`-`.100`, the GCP NAD's whereabouts
 range) and ping the pod (and vice-versa). Traffic flows: on-prem host ->
+switch (tags VLAN 100) -> VNF NIC (`.100` subinterface strips the tag) ->
 `br-vlan` -> VNF L2VNI -> VXLAN over VPN -> GCP `br-hs-110` -> pod.
 
-Without a real VLAN-trunked switch port handy, `vlan-setup.sh`'s `VLAN_NIC`
-can be a plain dummy interface so `br-vlan` exists and the controller can
-attach the L2VNI to it -- **but be clear about what this does and does not
-test.** A dummy interface never has a real link, so it never receives
-anything; the `.100` subinterface it creates sits on `br-vlan` completely
-inert (confirmed: its RX counter stays at 0 bytes/0 packets through
-everything below). The actual test workload here is a *separate* netns +
-veth pair attached directly to `br-vlan`, bypassing VLAN tag
-processing entirely -- it validates OpenPERouter's own bridging/EVPN/VXLAN
-path, not the `8021q` tag-strip mechanics a real VLAN-tagged host would
-exercise. See the status note at the top of this file.
+Without a real switch and a second physical host handy, `sim-switch-setup.sh`
+builds both in software: a VLAN-aware Linux bridge as the switch (a real
+trunk port carrying `vlan-setup.sh`'s tagged VLAN to the VNF, a real access
+port carrying plain untagged Ethernet to an external host netns -- exactly
+how a real end-user device connects, since almost no real host runs 8021q
+itself). This is not a stand-in for tagging: the switch bridge's VLAN
+filtering is the same kernel code a real switch ASIC/software switch uses,
+and `vlan-setup.sh`'s `.100` subinterface on the trunk side does genuine
+tag stripping/insertion, not a bypass.
 
 ```bash
-sudo ip link add dummy-wl type dummy && sudo ip link set dummy-wl up
-sudo VLAN_NIC=dummy-wl VLAN_ID=100 ./vlan-setup.sh
+# Builds sim-switch (bridge), vnf-nic<->sw-trunk-port (tagged),
+# host-nic<->sw-access-port (untagged/PVID) in netns ext-host with
+# 192.168.100.200/24. See the script's own comments for all the knobs.
+sudo ./sim-switch-setup.sh
+
+# Feed the trunk-side veth into vlan-setup.sh as its real VLAN_NIC -- this
+# is the exact same script/path a real deployment uses, just pointed at a
+# veth instead of a physical NIC:
+sudo VLAN_NIC=vnf-nic VLAN_ID=100 ./vlan-setup.sh
+sudo ip link set vnf-nic.100 mtu 1450   # match br-vlan; see the MTU gotcha
 
 # force a reconcile so the controller attaches L2VNI 110 to the now-existing
 # br-vlan (see the "controller restart" note in step 2) -- do this via
@@ -227,47 +242,53 @@ sudo VLAN_NIC=dummy-wl VLAN_ID=100 ./vlan-setup.sh
 # the pod is down even though podman restarted it fine.
 sudo systemctl restart controllerpod-pod.service
 
-# a netns + veth pair into br-vlan stands in for a real on-prem host on the
-# VLAN (attached directly to the bridge, NOT through dummy-wl.100 -- see
-# above):
-sudo ip netns add onprem-workload
-sudo ip link add veth-host type veth peer name veth-ns
-sudo ip link set veth-host master br-vlan up
-sudo ip link set veth-ns netns onprem-workload
-sudo ip netns exec onprem-workload ip link set lo up
-sudo ip netns exec onprem-workload ip link set veth-ns up
-sudo ip netns exec onprem-workload ip addr add 192.168.100.200/24 dev veth-ns
-
-sudo ip netns exec onprem-workload ping -c 5 192.168.100.10
+sudo ip netns exec ext-host ping -c 5 192.168.100.10
 ```
 
-**Verified working, bidirectionally** (on-prem laptop to
-`ellorent-vlan-evpn-k25qm`):
+**Verify the tagging itself is real**, not assumed, by capturing the same
+ping on both switch ports at once:
+```bash
+sudo tcpdump -nnei sw-trunk-port icmp &   # expect: vlan 100 tag visible
+sudo tcpdump -nnei sw-access-port icmp &  # expect: plain Ethernet, no tag
+sudo ip netns exec ext-host ping -c 3 192.168.100.10
+```
+Confirmed: the identical ICMP exchange (same id/seq, same MACs) shows
+`ethertype 802.1Q (0x8100)...vlan 100` on the trunk port and plain
+`ethertype IPv4` with no tag at all on the access port -- the switch is
+genuinely adding/removing the tag, not passing it through untouched.
+
+**Verified working, bidirectionally**, through this real VLAN path
+(on-prem laptop to `ellorent-vlan-evpn-k25qm`):
 - Ping: 0% loss, ~100ms RTT (matching the VPN's own latency).
-- `show evpn vni 110` on-prem: VXLAN device up, all 3 GCP worker VTEPs
-  (`10.0.200.1/2/3`) as head-end-replication flood targets.
-- `show evpn mac vni 110` on-prem, after the ping: the GCP pod's real MAC
-  learned as `remote` via VTEP `10.0.200.1` -- a genuine EVPN Type-2 route,
-  not flood-and-learn. Re-confirmed after recreating the GCP pod (picking
-  up a new MAC) to pick up the MTU fix: the new MAC was relearned
-  correctly, not stale state.
-- The same `show evpn mac vni 110` on GCP's worker-a router pod: the on-prem
-  test workload's MAC learned as `remote` via VTEP `100.65.0.0` -- confirming
-  Type-2 routes flow both ways across the tunnel.
-- **Real bulk TCP transfers, both directions, after the MTU fix**: 300KB of
-  random data via plain `nc`, GCP pod to on-prem workload and back, using
-  the pod's own `curl`/`nc` (available in the `agnhost` image) and a
-  netns-local listener on the on-prem side:
+- MTU boundary holds exactly as measured (see the MTU gotcha): 1380 bytes
+  (IP-layer) 0% loss, 1381 bytes cleanly rejected -- re-confirmed through
+  the real tagged path, not just the earlier bridge-only test.
+- `show evpn vni 110` on-prem: VXLAN device up, all 3 GCP worker VTEPs as
+  head-end-replication flood targets.
+- `show evpn mac vni 110` on-prem, after the ping: `ext-host`'s **real**
+  MAC (`host-nic`'s own address, arriving after genuine tag stripping)
+  learned as `local`, and the GCP pod's MAC learned as `remote` via VTEP
+  `10.0.200.1` -- a genuine EVPN Type-2 route, not flood-and-learn.
+- The same `show evpn mac vni 110` on GCP's worker-a router pod: `ext-host`'s
+  MAC learned as `remote` via VTEP `100.65.0.0` -- confirming Type-2 routes
+  flow both ways across the tunnel, originating from a MAC that only ever
+  existed behind the simulated access port.
+- **Real bulk TCP transfers, both directions**: 300KB of random data via
+  plain `nc`, GCP pod to `ext-host` and back, using the pod's own
+  `curl`/`nc` (available in the `agnhost` image) and a netns-local listener
+  on the on-prem side:
   ```bash
-  # GCP pod -> on-prem (run the receiver first, then the sender)
-  sudo ip netns exec onprem-workload nc -l -p 5001 > received.dat &
+  # GCP pod -> ext-host (run the receiver first, then the sender)
+  sudo ip netns exec ext-host nc -l -p 5001 > received.dat &
   oc exec -n default vlan-workload -- sh -c \
     "head -c 307200 /dev/urandom | tee /tmp/sent.dat | nc 192.168.100.200 5001"
   # compare: md5sum received.dat vs oc exec ... md5sum /tmp/sent.dat
   ```
   Both directions: exactly 307200 bytes received, MD5 identical to what was
   sent -- 0 bytes lost or corrupted across roughly 215 TCP segments per
-  transfer, each constrained by the fixed MTU chain end to end.
+  transfer, each constrained by the fixed MTU chain end to end, and each
+  one genuinely crossing the simulated trunk/access ports with real 802.1Q
+  tags added and removed in transit.
 
 ## Teardown
 
