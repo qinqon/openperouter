@@ -7,18 +7,37 @@
 #   Its host side is an EXTERNAL Linux bridge (br-vlan) into which the operator
 #   plugs the workload VLAN (see vlan-setup.sh). Pure east-west L2, no gateway.
 #
-# The underlay interface is a NetworkDevice: the named host NIC is moved into
-# the "perouter" netns and used as the VTEP source / VPN egress. Replace
-# "eth1" below with the laptop uplink reserved for the VNF (max 15 chars); it
-# is consumed by the host and cannot be used by the host OS afterwards, so use
-# a spare NIC / USB-eth / dedicated VLAN subinterface.
+# The underlay interface is a NetworkDevice: the named interface is moved
+# into the "perouter" netns and used as the VTEP source / VPN egress. It is
+# consumed and cannot be used outside perouter afterwards, so use either:
+#   - a spare/dedicated NIC (USB-eth, VLAN subinterface), or
+#   - (recommended for a laptop with a single uplink) a macvlan sub-interface
+#     in bridge mode on the real uplink, so the physical NIC/its own address
+#     are never touched: e.g.
+#       ip link add macvlan0 link <real-uplink> type macvlan mode bridge
+#       ip addr add <free-LAN-ip>/<prefix> dev macvlan0
+#       ip link set macvlan0 up
+#     Give it a real routable LAN address (static, or DHCP) BEFORE the
+#     controller runs -- NetworkDevice never assigns an address itself, it
+#     only moves the interface and restores whatever address(es) it already
+#     had. Note this address is on the *same* NAT hop as the host's own
+#     uplink; going through a second, container-engine-managed NAT on top
+#     (podman/Docker default bridge networking for this same interface) has
+#     been observed to silently break IKE on some home routers -- see
+#     ../../README.md's "GCP firewall" gotcha for the analogous GCP-side
+#     issue and the README section on this laptop-side NAT constraint.
 #
-# The 3 neighbor addresses below are examples from GCP_RR_CIDR (10.0.1.0/24).
-# They are derived per-node from the real openpe.io/nodeindex annotation of
-# each GCP control-plane node, not from a fixed formula (see gcp/vtep.sh) --
-# replace them with the actual addresses printed by:
-#   cd ../../gcp && source env.sh && for n in "${MASTER_NODES[@]}"; do
-#     source vtep.sh; vtep_ip_for_node "$n" "$GCP_RR_CIDR"; done
+# Replace "macvlan0" below with your own interface name (max 15 chars) if
+# different, and add a default route inside perouter once it's moved (the
+# move restores addresses, not routes):
+#   ip netns exec perouter ip route add default via <LAN-gateway> dev macvlan0
+#
+# The 3 neighbor addresses below are derived per-node from the real
+# openpe.io/nodeindex annotation of each GCP control-plane node, not from a
+# fixed formula (see gcp/vtep.sh) -- they are NOT guessable ahead of time and
+# will differ on every cluster/rebuild. Get the real ones with:
+#   cd ../../gcp && source env.sh && source network.env && source vtep.sh
+#   for n in "${MASTER_NODES[@]}"; do vtep_ip_for_node "$n" "$GCP_RR_CIDR"; done
 underlays:
   - name: onprem
     asn: 64514
@@ -28,26 +47,26 @@ underlays:
     interfaces:
       - type: NetworkDevice
         networkDevice:
-          interfaceName: eth1
+          interfaceName: macvlan0
     neighbors:
       # eBGP multihop to every GCP route reflector, reached over the VPN.
       # Each RR reflects the workers' ipv4-unicast (VTEP reachability) and
       # EVPN routes, so peering all 3 gives redundancy: any one RR being
       # unreachable still leaves 2 sessions learning every GCP VTEP.
       - asn: 65001
-        address: 10.0.1.0 # REPLACE: route reflector 1 (see comment above)
+        address: 10.0.1.4 # ellorent-vlan-evpn-k25qm-master-0
         properties:
           - type: ebgpMultiHop
             ebgpMultiHop:
               ttl: 10
       - asn: 65001
-        address: 10.0.1.4 # REPLACE: route reflector 2
+        address: 10.0.1.5 # ellorent-vlan-evpn-k25qm-master-1
         properties:
           - type: ebgpMultiHop
             ebgpMultiHop:
               ttl: 10
       - asn: 65001
-        address: 10.0.1.5 # REPLACE: route reflector 3
+        address: 10.0.1.0 # ellorent-vlan-evpn-k25qm-master-2
         properties:
           - type: ebgpMultiHop
             ebgpMultiHop:

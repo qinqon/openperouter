@@ -10,9 +10,14 @@ on-prem side is not a Kubernetes cluster but one container-based router that
 also terminates the VPN, so you can exercise the cloud-VPN overhead and the
 VLAN attachment without a second cluster.
 
-**GCP-side status: verified working end-to-end** (BGP full mesh, EVPN Type-2/3
-routes, VXLAN datapath, pod-to-pod ping across nodes). The on-prem VNF steps
-are implemented but not yet run against a real laptop/VPN in this branch.
+**Status: VPN + BGP + EVPN control plane verified working end-to-end**,
+laptop to GCP, including all 3 route reflectors: IPsec tunnel established,
+all 3 on-prem-to-RR eBGP sessions up (`ipv4-unicast` + `l2vpn evpn`), and the
+on-prem VNF correctly sees EVPN Type-3 routes for all 3 GCP worker VTEPs via
+route reflection across the eBGP boundary. GCP-side EVPN datapath (VXLAN,
+pod-to-pod ping across nodes) is also verified. **Not yet verified:** the
+actual on-prem-to-GCP L2VNI/VXLAN data plane and workload connectivity (the
+last step below) -- the on-prem side has no workload VLAN attached yet.
 
 ```
         ON-PREM (laptop)                     GCP OpenShift (ellorent-vlan-evpn)
@@ -71,6 +76,7 @@ vnf/                     on-prem VNF (systemd/Podman, static config, no k8s)
   config/                node-config.yaml + configs/openpe_config.yaml (static)
   frrconfig/             FRR seed files
   start-vpn.sh           strongSwan config + load (runs in perouter netns)
+  underlay-setup.sh      create the macvlan underlay uplink (router side)
   vlan-setup.sh          create br-vlan + VLAN subinterface (workload side)
   deploy.sh/undeploy.sh  install/remove quadlets and static config
   verify.sh              VPN/BGP/EVPN/datapath checks
@@ -90,9 +96,13 @@ kubeconfig.sh            pull the cluster kubeconfig from the Jenkins artifact
 
 ## Prerequisites
 
-- **On-prem (laptop):** Podman + systemd, root, a **spare NIC** for the underlay
-  (moved into the router netns, unusable by the host afterwards) and a NIC for
-  the workload VLAN. A public IP reachable by GCP for the VPN.
+- **On-prem (laptop):** Podman + systemd, root, and a NIC for the workload
+  VLAN. For the underlay uplink (moved into the router netns, unusable
+  outside it afterwards), either a spare/dedicated NIC, or -- recommended,
+  and what was actually used for the verified run below -- a **macvlan
+  sub-interface** on the laptop's real uplink via `underlay-setup.sh`, so the
+  physical NIC and its own address are never touched. A public IP reachable
+  by GCP for the VPN (behind NAT is fine; see the NAT gotcha below).
 - **GCP:** an OpenShift cluster (this PoC targets `ellorent-vlan-evpn`, CNV
   4.22, 3 masters + 3 workers), `oc` with its kubeconfig, and `gcloud`
   authenticated to the project (`gcloud auth login`, or a valid
@@ -128,22 +138,46 @@ Put the printed `GCP_VPN_IP` into `network.env`. `underlay.sh` and
 ### 2. On-prem VNF (laptop, as root)
 
 Edit `vnf/config/configs/openpe_config.yaml`: set the underlay `interfaceName`
-to your spare NIC, and replace the 3 placeholder route reflector addresses
-with the real ones printed by:
+(default `macvlan0`, matching `underlay-setup.sh` below) and replace the 3
+route reflector addresses (checked in from a past run, and specific to that
+cluster instance/rebuild) with the real ones for your cluster, printed by:
 
 ```bash
-cd gcp && source env.sh && source vtep.sh
+cd gcp && source env.sh && source network.env && source vtep.sh
 for n in "${MASTER_NODES[@]}"; do vtep_ip_for_node "$n" "$GCP_RR_CIDR"; done
 ```
 
-Then:
+Then, from `vnf/`:
 
 ```bash
-cd vnf
+# Underlay uplink: a macvlan sub-interface on the real uplink NIC, not the
+# NIC itself (see "Prerequisites"). Must exist with a real address BEFORE
+# deploy.sh runs -- NetworkDevice only moves an interface and restores
+# whatever address it already had, it never assigns one itself.
+UNDERLAY_NIC=<real-uplink> UNDERLAY_IP=<free-LAN-ip>/<prefix> \
+  UNDERLAY_GW=<LAN-gateway> ./underlay-setup.sh
+
 VLAN_NIC=eth2 VLAN_ID=100 ./vlan-setup.sh                 # workload VLAN bridge
-NETWORK_ENV=../gcp/network.env sudo ./deploy.sh           # build + start the VNF
+
+# SKIP_VPN_IMAGE_BUILD=1 if rootful `podman build` on this host cannot reach
+# the internet (see gotcha below) and you already loaded the image rootless.
+NETWORK_ENV=../gcp/network.env sudo -E ./deploy.sh        # start the VNF
+
+# The move into perouter preserves the uplink's address but not a default
+# route -- add one once perouter exists (deploy.sh has run):
+sudo ip netns exec perouter ip route add default via <LAN-gateway> dev macvlan0
+
 sudo ./verify.sh                                          # VPN/BGP/EVPN checks
 ```
+
+At this point `verify.sh` should show the IPsec SA `ESTABLISHED`, all 3 route
+reflectors `Established` in both `show bgp summary` address families, and
+EVPN Type-3 routes for all 3 GCP worker VTEPs under `show bgp l2vpn evpn`.
+`show evpn vni 110` reporting "VNI 110 does not exist" at this stage is
+expected -- the L2VNI only attaches once `vlan-setup.sh`'s `br-vlan` exists,
+which the commands above already create; if this step ran before `br-vlan`
+existed, restart the controller once (`sudo podman restart controller`) to
+force a fresh reconcile.
 
 ### 3. Test the stretch
 
@@ -151,9 +185,16 @@ sudo ./verify.sh                                          # VPN/BGP/EVPN checks
 - Give an on-prem host on the VLAN an address in the same subnet and ping the
   pod (and vice-versa). Traffic flows: on-prem host -> `br-vlan` -> VNF L2VNI
   -> VXLAN over VPN -> GCP `br-hs-110` -> pod.
-- Verified on the GCP side alone: two pods on different workers
+- **Verified so far:** the control plane end to end -- IPsec tunnel
+  established, all 3 on-prem-to-RR eBGP sessions up, on-prem FRR holds EVPN
+  Type-3 routes for all 3 GCP worker VTEPs (`show bgp l2vpn evpn route`), and
+  IPv4-unicast VTEP reachability for both the RRs and the workers. Also
+  verified on the GCP side alone: two pods on different workers
   (`vlan-workload` / a second pod pinned to another node) ping each other with
   0% loss once `firewall.sh` has been applied.
+- **Not yet verified:** an actual on-prem workload attached to `br-vlan`
+  exchanging traffic with a GCP pod over the full VXLAN-over-VPN path -- this
+  needs `vlan-setup.sh` run with a real workload NIC/VLAN and a host on it.
 
 ## Teardown
 
@@ -193,6 +234,35 @@ oc delete namespace openperouter-system
   upstream, also CIDR-based). Run `firewall.sh` **before** trusting any BGP or
   EVPN state -- without it, BGP sessions simply never establish, with no
   useful error beyond "Connect" state forever.
+- **Home router NAT can silently break the on-prem VPN.** Observed on at
+  least one dev laptop: when the VPN sidecar's outbound traffic passes
+  through an *extra* NAT layer on top of the home router's own NAT --
+  reproduced identically with podman rootless (`pasta`), podman rootful
+  (`netavark` bridge), and plain Docker's default bridge -- GCP's tunnel sits
+  at `NO_INCOMING_PACKETS` forever: IKE packets leave the container fine
+  (confirmed with `tcpdump`) but never elicit a response, while the identical
+  packet from a single-NAT-hop path (a raw host socket, or `--network host`)
+  gets an immediate, valid IKE response. This looks like a common consumer
+  router firmware bug around "IPsec/VPN passthrough" ALG handling of
+  doubly-NATed traffic, not anything specific to this example. `perouter`'s
+  `NetworkDevice` uplink is already a single NAT hop once it is a real or
+  macvlan interface (see `underlay-setup.sh` and "Prerequisites") -- the
+  failure mode only shows up if you instead try to give the VPN container its
+  own ordinary container-engine network (podman/Docker default bridge) for
+  its uplink.
+- **`local_addrs = %defaultroute` silently fails under swanctl/vici.**
+  `%defaultroute` is a legacy `ipsec.conf`/`starter` keyword; loaded via
+  `swanctl --load-all` it is not recognized, and charon tries to literally
+  DNS-resolve the string ("Name does not resolve"), binds to `0.0.0.0`, and
+  the peer never sees a plausible source address. `start-vpn.sh` uses `%any`
+  (the swanctl.conf equivalent: let charon pick the source address via
+  routing to `remote_addrs`).
+- **Rootful `podman build` may not reach the internet** on hosts where
+  rootless build works fine (observed with the netavark rootful network
+  backend on at least one dev machine) -- `podman pull`/`run` are unaffected,
+  only the build step. Build `Dockerfile.vpn` rootless and load it into
+  root's storage (`podman save` / `sudo podman load`), then
+  `SKIP_VPN_IMAGE_BUILD=1 sudo -E ./deploy.sh`.
 - **Static / cluster-less:** the VNF controller runs in `--mode host` and reads
   only `node-config.yaml` + `configs/openpe_*.yaml`. With no Kubernetes API it
   logs *"continue with static config only"* and keeps the datapath reconciled

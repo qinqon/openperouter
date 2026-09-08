@@ -15,7 +15,7 @@ podman ps --format '{{.Names}}\t{{.Status}}' | grep -E 'frr|reloader|vpn|control
 log "IPsec security associations (expect ESTABLISHED)"
 podman exec vpn swanctl --list-sas 2>/dev/null || echo "vpn container not ready"
 
-log "BGP summary (expect the RR 10.0.200.1 Established)"
+log "BGP summary (expect all 3 GCP route reflectors Established, ipv4 unicast + evpn)"
 podman exec frr vtysh -c "show bgp summary" 2>/dev/null || echo "frr not ready"
 
 log "EVPN VNI 110"

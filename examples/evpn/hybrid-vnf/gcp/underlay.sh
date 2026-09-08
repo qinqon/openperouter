@@ -39,6 +39,18 @@ source "${SCRIPT_DIR}/vtep.sh"
 
 NAMESPACE="openperouter-system"
 
+# The on-prem VNF is a single, non-Kubernetes node running OpenPERouter in
+# static/host mode: its tunnelEndpoint has no interfaceName (loopback
+# fallback), and static mode always uses the fixed index from node-config.yaml
+# (0 in the shipped example) rather than a controller-assigned one -- so its
+# address is deterministically the network address of VNF_VTEP_CIDR, exactly
+# like index 0 on any other pool.
+VNF_VTEP="$(python3 - "$VNF_VTEP_CIDR" <<'PY'
+import sys, ipaddress
+print(str(ipaddress.ip_network(sys.argv[1]).network_address))
+PY
+)"
+
 # ipvlan_underlay renders the shared "interfaces" block: an ipvlan-L3 net1 on
 # br-ex with the derived tunnel endpoint address injected through the ips
 # capability, and routes to every other pool so return traffic finds its way
@@ -99,6 +111,20 @@ $(ipvlan_underlay ipvlan-rr)
         - type: evpn
           properties:
             - type: routeReflectorClient
+    # The on-prem VNF, over the Cloud VPN: a different ASN (eBGP), so this
+    # sets asn (not type) -- routeReflectorClient is only valid with
+    # type: Internal and does not apply to an eBGP peer anyway. addressFamilies
+    # must be explicit: the default for an IPv4 neighbor only adds evpn when
+    # the *local* underlay has L2VNIs/L3VNIs, which the reflectors never do.
+    - asn: ${VNF_ASN}
+      address: ${VNF_VTEP}
+      properties:
+        - type: ebgpMultiHop
+          ebgpMultiHop:
+            ttl: 10
+      addressFamilies:
+        - type: ipv4unicast
+        - type: evpn
 EOF
 }
 

@@ -17,12 +17,22 @@
 # Usage:
 #   ./deploy.sh            # deploy
 #   ROUTER_IMAGE=quay.io/openperouter/router:main ./deploy.sh
+#   SKIP_VPN_IMAGE_BUILD=1 ./deploy.sh   # reuse an already-loaded
+#     localhost/openpe-vnf-vpn:latest instead of rebuilding it. Needed on
+#     hosts where rootful `podman build` cannot reach the internet (observed
+#     with the netavark rootful network backend on at least one dev
+#     machine) even though rootless build and rootful pull/run work fine;
+#     build the image rootless instead and load it into root's storage:
+#       podman build -t localhost/openpe-vnf-vpn:latest -f Dockerfile.vpn .
+#       podman save localhost/openpe-vnf-vpn:latest -o /tmp/vpn.tar
+#       sudo podman load -i /tmp/vpn.tar
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 QUADLET_DIR="/etc/containers/systemd"
 ROUTER_IMAGE="${ROUTER_IMAGE:-quay.io/openperouter/router:main}"
 NETWORK_ENV="${NETWORK_ENV:-${SCRIPT_DIR}/../gcp/network.env}"
+SKIP_VPN_IMAGE_BUILD="${SKIP_VPN_IMAGE_BUILD:-0}"
 
 log() { echo "[deploy] $*"; }
 
@@ -35,8 +45,16 @@ require_root() {
 
 require_root
 
-log "building strongSwan sidecar image"
-podman build -t localhost/openpe-vnf-vpn:latest -f "${SCRIPT_DIR}/Dockerfile.vpn" "${SCRIPT_DIR}"
+if [[ "${SKIP_VPN_IMAGE_BUILD}" == "1" ]]; then
+    log "skipping strongSwan sidecar image build (SKIP_VPN_IMAGE_BUILD=1)"
+    podman image exists localhost/openpe-vnf-vpn:latest || {
+        echo "SKIP_VPN_IMAGE_BUILD=1 but localhost/openpe-vnf-vpn:latest is not loaded" >&2
+        exit 1
+    }
+else
+    log "building strongSwan sidecar image"
+    podman build -t localhost/openpe-vnf-vpn:latest -f "${SCRIPT_DIR}/Dockerfile.vpn" "${SCRIPT_DIR}"
+fi
 
 log "pulling router image ${ROUTER_IMAGE}"
 podman pull "${ROUTER_IMAGE}"
