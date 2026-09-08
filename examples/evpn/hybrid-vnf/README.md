@@ -10,14 +10,15 @@ on-prem side is not a Kubernetes cluster but one container-based router that
 also terminates the VPN, so you can exercise the cloud-VPN overhead and the
 VLAN attachment without a second cluster.
 
-**Status: VPN + BGP + EVPN control plane verified working end-to-end**,
-laptop to GCP, including all 3 route reflectors: IPsec tunnel established,
-all 3 on-prem-to-RR eBGP sessions up (`ipv4-unicast` + `l2vpn evpn`), and the
-on-prem VNF correctly sees EVPN Type-3 routes for all 3 GCP worker VTEPs via
-route reflection across the eBGP boundary. GCP-side EVPN datapath (VXLAN,
-pod-to-pod ping across nodes) is also verified. **Not yet verified:** the
-actual on-prem-to-GCP L2VNI/VXLAN data plane and workload connectivity (the
-last step below) -- the on-prem side has no workload VLAN attached yet.
+**Status: fully verified working end-to-end, laptop to GCP**, including the
+actual stretched workload: IPsec tunnel established; all 3 on-prem-to-RR
+eBGP sessions up (`ipv4-unicast` + `l2vpn evpn`); EVPN Type-3 (VTEP) routes
+for all 3 GCP worker VTEPs visible on-prem via route reflection across the
+eBGP boundary; the on-prem VXLAN device came up with all 3 worker VTEPs as
+head-end-replication flood targets; and a real on-prem workload pinged the
+GCP pod bidirectionally with 0% loss (~100ms RTT, matching the VPN's own
+latency), with genuine EVPN Type-2 (MAC) routes exchanged in both
+directions -- not just VXLAN flood-and-learn.
 
 ```
         ON-PREM (laptop)                     GCP OpenShift (ellorent-vlan-evpn)
@@ -176,25 +177,59 @@ EVPN Type-3 routes for all 3 GCP worker VTEPs under `show bgp l2vpn evpn`.
 `show evpn vni 110` reporting "VNI 110 does not exist" at this stage is
 expected -- the L2VNI only attaches once `vlan-setup.sh`'s `br-vlan` exists,
 which the commands above already create; if this step ran before `br-vlan`
-existed, restart the controller once (`sudo podman restart controller`) to
-force a fresh reconcile.
+existed, restart it once via `sudo systemctl restart
+controllerpod-pod.service` (not `podman restart controller` directly --
+quadlet-managed pods track state through the systemd unit, and bypassing it
+can leave the unit thinking the pod is down even though podman restarted it
+fine) to force a fresh reconcile.
 
 ### 3. Test the stretch
 
-- GCP pod `vlan-workload` gets an address from `192.168.100.0/24` on the NAD.
-- Give an on-prem host on the VLAN an address in the same subnet and ping the
-  pod (and vice-versa). Traffic flows: on-prem host -> `br-vlan` -> VNF L2VNI
-  -> VXLAN over VPN -> GCP `br-hs-110` -> pod.
-- **Verified so far:** the control plane end to end -- IPsec tunnel
-  established, all 3 on-prem-to-RR eBGP sessions up, on-prem FRR holds EVPN
-  Type-3 routes for all 3 GCP worker VTEPs (`show bgp l2vpn evpn route`), and
-  IPv4-unicast VTEP reachability for both the RRs and the workers. Also
-  verified on the GCP side alone: two pods on different workers
-  (`vlan-workload` / a second pod pinned to another node) ping each other with
-  0% loss once `firewall.sh` has been applied.
-- **Not yet verified:** an actual on-prem workload attached to `br-vlan`
-  exchanging traffic with a GCP pod over the full VXLAN-over-VPN path -- this
-  needs `vlan-setup.sh` run with a real workload NIC/VLAN and a host on it.
+GCP pod `vlan-workload` gets an address from `192.168.100.0/24` on the NAD
+(`192.168.100.10` in the verified run). Give an on-prem host on the VLAN an
+address in the same subnet (avoid `.10`-`.100`, the GCP NAD's whereabouts
+range) and ping the pod (and vice-versa). Traffic flows: on-prem host ->
+`br-vlan` -> VNF L2VNI -> VXLAN over VPN -> GCP `br-hs-110` -> pod.
+
+Without a real VLAN-trunked switch port handy, `vlan-setup.sh`'s `VLAN_NIC`
+can be a plain dummy interface -- only `br-vlan` existing and having a member
+matters for the controller, nothing here needs the VLAN tag to actually
+carry traffic anywhere:
+
+```bash
+sudo ip link add dummy-wl type dummy && sudo ip link set dummy-wl up
+sudo VLAN_NIC=dummy-wl VLAN_ID=100 ./vlan-setup.sh
+
+# force a reconcile so the controller attaches L2VNI 110 to the now-existing
+# br-vlan (see the "controller restart" note in step 2) -- do this via
+# systemctl, not `podman restart controller` directly: quadlet-managed pods
+# track state through the unit, and bypassing it can leave the unit thinking
+# the pod is down even though podman restarted it fine.
+sudo systemctl restart controllerpod-pod.service
+
+# a netns + veth pair into br-vlan stands in for a real on-prem host on the
+# VLAN:
+sudo ip netns add onprem-workload
+sudo ip link add veth-host type veth peer name veth-ns
+sudo ip link set veth-host master br-vlan up
+sudo ip link set veth-ns netns onprem-workload
+sudo ip netns exec onprem-workload ip link set lo up
+sudo ip netns exec onprem-workload ip link set veth-ns up
+sudo ip netns exec onprem-workload ip addr add 192.168.100.200/24 dev veth-ns
+
+sudo ip netns exec onprem-workload ping -c 5 192.168.100.10
+```
+
+**Verified working, bidirectionally, 0% loss, ~100ms RTT** (on-prem laptop to
+`ellorent-vlan-evpn-k25qm`):
+- `show evpn vni 110` on-prem: VXLAN device up, all 3 GCP worker VTEPs
+  (`10.0.200.1/2/3`) as head-end-replication flood targets.
+- `show evpn mac vni 110` on-prem, after the ping: the GCP pod's real MAC
+  learned as `remote` via VTEP `10.0.200.1` -- a genuine EVPN Type-2 route,
+  not flood-and-learn.
+- The same `show evpn mac vni 110` on GCP's worker-a router pod: the on-prem
+  test workload's MAC learned as `remote` via VTEP `100.65.0.0` -- confirming
+  Type-2 routes flow both ways across the tunnel.
 
 ## Teardown
 
