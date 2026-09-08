@@ -23,6 +23,9 @@ if [[ -z "${ZIP_PATH}" ]]; then
 fi
 
 echo "downloading ${JENKINS_URL}/artifact/${ZIP_PATH}"
-curl -s "${JENKINS_URL}/artifact/${ZIP_PATH}" | bsdtar -xf -
+TMP_ZIP="$(mktemp --suffix=.zip)"
+trap 'rm -f "${TMP_ZIP}"' EXIT
+curl -s "${JENKINS_URL}/artifact/${ZIP_PATH}" -o "${TMP_ZIP}"
+unzip -oq "${TMP_ZIP}"
 echo "extracted. kubeconfig:"
 find cluster-dirs -path '*/auth/kubeconfig' 2>/dev/null || true

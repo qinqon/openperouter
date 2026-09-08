@@ -3,12 +3,19 @@
 # (no routingDomain, no gateway): pure east-west L2 between the GCP pods and the
 # on-prem VLAN. The controller creates the host bridge br-hs-110 and a NAD can
 # bridge pods onto it.
+#
+# Scoped to workers: the control-plane nodes are pure BGP route reflectors
+# with no tunnelEndpoint, so they cannot host a VNI (a VNI's VTEP is derived
+# from the underlay's tunnelEndpoint, which the reflectors do not have).
 apiVersion: network.openperouter.io/v1alpha1
 kind: L2VNI
 metadata:
   name: vlan-stretch
   namespace: openperouter-system
 spec:
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
   vni: 110
   vxlanPort: 4789
   hostMaster:
@@ -47,6 +54,10 @@ metadata:
   annotations:
     k8s.v1.cni.cncf.io/networks: '[{"name":"vlan-stretch","namespace":"default"}]'
 spec:
+  # The br-hs-110 bridge backing this NAD only exists on workers (the
+  # route reflectors do not host the L2VNI).
+  nodeSelector:
+    node-role.kubernetes.io/worker: ""
   containers:
     - name: agnhost
       image: registry.k8s.io/e2e-test-images/agnhost:2.47

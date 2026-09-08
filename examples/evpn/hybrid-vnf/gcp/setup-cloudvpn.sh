@@ -3,7 +3,11 @@
 # Sets up a Classic (policy-based) GCP Cloud VPN from the cluster VPC to the
 # on-prem laptop running the OpenPERouter VNF, plus the route and firewall
 # rules needed for the EVPN underlay to traverse it:
-#   - traffic selectors GCP_VTEP_CIDR <-> VNF_VTEP_CIDR
+#   - traffic selectors {GCP_VTEP_CIDR,GCP_RR_CIDR} <-> VNF_VTEP_CIDR -- both
+#     GCP pools are needed: the VNF's BGP control-plane sessions go to the
+#     route reflectors (GCP_RR_CIDR), while the EVPN VXLAN data plane goes
+#     directly to the worker VTEPs (GCP_VTEP_CIDR), since route reflection
+#     does not change the l2vpn evpn next-hop.
 #   - VPC route VNF_VTEP_CIDR -> tunnel
 #   - firewall: BGP(179), VXLAN(4789), ICMP from VNF_VTEP_CIDR
 #
@@ -33,7 +37,7 @@ gc() { gcloud --project="$PROJECT" "$@"; }
 echo "=== GCP Cloud VPN to on-prem VNF ==="
 echo "  network:   ${NETWORK}"
 echo "  on-prem:   ${ONPREM_PUBLIC_IP}"
-echo "  selectors: ${GCP_VTEP_CIDR} <-> ${VNF_VTEP_CIDR}"
+echo "  selectors: ${GCP_VTEP_CIDR},${GCP_RR_CIDR} <-> ${VNF_VTEP_CIDR}"
 
 echo "[1/5] VPN gateway + external IP"
 if ! gc compute target-vpn-gateways describe "$GW" --region="$REGION" &>/dev/null; then
@@ -63,7 +67,7 @@ gc compute vpn-tunnels create "$TUNNEL" \
     --shared-secret="$SHARED_SECRET" \
     --ike-version=2 \
     --target-vpn-gateway="$GW" \
-    --local-traffic-selector="$GCP_VTEP_CIDR" \
+    --local-traffic-selector="${GCP_VTEP_CIDR},${GCP_RR_CIDR}" \
     --remote-traffic-selector="$VNF_VTEP_CIDR"
 
 echo "[3/5] route ${VNF_VTEP_CIDR} -> tunnel"

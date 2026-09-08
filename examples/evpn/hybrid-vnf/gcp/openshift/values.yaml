@@ -9,7 +9,7 @@ openperouter:
     repository: quay.io/ellorent/router
     tag: vlan-evpn-gcp
     pullPolicy: Always
-  # Keep the router/controller pods off the control plane. The chart's default
-  # tolerations still allow scheduling there, so pin them to workers instead.
-  nodeSelector:
-    node-role.kubernetes.io/worker: ""
+  # OpenPERouter runs on every node: the control-plane nodes act as pure BGP
+  # route reflectors (see gcp/underlay.sh) and need the router/controller pods
+  # too. No nodeSelector override needed -- the chart's default tolerations
+  # already cover the control-plane/master NoSchedule taints.

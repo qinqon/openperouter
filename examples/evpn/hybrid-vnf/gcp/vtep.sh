@@ -1,11 +1,15 @@
 #!/bin/bash
 #
-# Helpers to compute the tunnel endpoint (VTEP) address OpenPERouter derives
-# for a node, so that the cloud side can be configured (GCP alias IPs, BGP
-# peers) without discovering it at runtime.
+# Helpers to compute the tunnel endpoint address OpenPERouter derives for a
+# node, so that the cloud side can be configured (GCP alias IPs, BGP peers)
+# without discovering it at runtime. Used for both roles: workers derive
+# their VTEP from GCP_VTEP_CIDR, control-plane route reflectors derive their
+# own real address the same way from GCP_RR_CIDR (a route reflector has no
+# VNIs, but tunnelEndpoint.interfaceName does not require any -- it is a
+# generic "derive a per-node address on this CNIDevice" mechanism).
 
-# vtep_ip_for_node prints the VTEP address of the node: the address of the
-# tunnel endpoint pool at the offset of the node index, as allocated by
+# vtep_ip_for_node prints the tunnel endpoint address of the node: the
+# address of the given pool at the offset of the node index, as allocated by
 # OpenPERouter and recorded in the openpe.io/nodeindex node annotation.
 vtep_ip_for_node() {
     local node=$1
@@ -25,7 +29,9 @@ vtep_ip_for_node() {
 }
 
 # node_index prints the node index annotated by OpenPERouter, waiting a bit
-# for the controller to annotate a freshly deployed cluster.
+# for the controller to annotate a freshly deployed cluster. The annotation
+# is set for every node as soon as the controller is running, regardless of
+# whether an Underlay selects that node yet.
 node_index() {
     local node=$1
     local index

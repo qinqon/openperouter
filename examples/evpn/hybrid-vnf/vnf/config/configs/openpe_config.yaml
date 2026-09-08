@@ -2,7 +2,7 @@
 #
 # Topology:
 #   this VNF (ASN 64514, VTEP 100.65.0.0/24 on the underlay NIC)
-#     --- IPsec/Cloud VPN --->  GCP route reflector VTEP 10.0.200.1 (ASN 65001)
+#     --- IPsec/Cloud VPN --->  3 GCP control-plane route reflectors (ASN 65001)
 #   A single L2VNI (vni 110) is stretched to the GCP L2VNI of the same vni.
 #   Its host side is an EXTERNAL Linux bridge (br-vlan) into which the operator
 #   plugs the workload VLAN (see vlan-setup.sh). Pure east-west L2, no gateway.
@@ -12,6 +12,13 @@
 # "eth1" below with the laptop uplink reserved for the VNF (max 15 chars); it
 # is consumed by the host and cannot be used by the host OS afterwards, so use
 # a spare NIC / USB-eth / dedicated VLAN subinterface.
+#
+# The 3 neighbor addresses below are examples from GCP_RR_CIDR (10.0.1.0/24).
+# They are derived per-node from the real openpe.io/nodeindex annotation of
+# each GCP control-plane node, not from a fixed formula (see gcp/vtep.sh) --
+# replace them with the actual addresses printed by:
+#   cd ../../gcp && source env.sh && for n in "${MASTER_NODES[@]}"; do
+#     source vtep.sh; vtep_ip_for_node "$n" "$GCP_RR_CIDR"; done
 underlays:
   - name: onprem
     asn: 64514
@@ -23,11 +30,24 @@ underlays:
         networkDevice:
           interfaceName: eth1
     neighbors:
-      # eBGP multihop to the GCP route reflector's VTEP, reached over the VPN.
-      # The RR reflects the workers' ipv4-unicast (VTEP reachability) and EVPN
-      # routes, so this single session is enough to learn every GCP VTEP.
+      # eBGP multihop to every GCP route reflector, reached over the VPN.
+      # Each RR reflects the workers' ipv4-unicast (VTEP reachability) and
+      # EVPN routes, so peering all 3 gives redundancy: any one RR being
+      # unreachable still leaves 2 sessions learning every GCP VTEP.
       - asn: 65001
-        address: 10.0.200.1
+        address: 10.0.1.0 # REPLACE: route reflector 1 (see comment above)
+        properties:
+          - type: ebgpMultiHop
+            ebgpMultiHop:
+              ttl: 10
+      - asn: 65001
+        address: 10.0.1.4 # REPLACE: route reflector 2
+        properties:
+          - type: ebgpMultiHop
+            ebgpMultiHop:
+              ttl: 10
+      - asn: 65001
+        address: 10.0.1.5 # REPLACE: route reflector 3
         properties:
           - type: ebgpMultiHop
             ebgpMultiHop:
