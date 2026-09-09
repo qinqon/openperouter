@@ -494,16 +494,37 @@ cd vnf/vms && kcli delete plan hybrid-vnf-onprem
 # on-prem bare host, if you used that path instead
 sudo ./vnf/undeploy.sh
 
-# GCP
+# GCP: just the OpenPERouter/VNF pieces, keeping the cluster itself
 oc delete -f gcp/vm-workload.yaml
 oc delete -f gcp/l2vni.yaml
 oc delete underlay -n openperouter-system route-reflectors workers
 helm uninstall openperouter -n openperouter-system
 oc delete namespace openperouter-system
-# remove the alias IPs, the vtep-underlay/vpn firewall rules, and the Cloud
-# VPN resources created by alias-ip.sh/firewall.sh/setup-cloudvpn.sh with
-# gcloud -- everything is named with the ${CLUSTER_INFRA_ID} prefix.
+cd gcp && ./firewall.sh cleanup && ./setup-cloudvpn.sh cleanup
 ```
+
+If the whole cluster is being destroyed instead (e.g. an ephemeral Jenkins
+cluster reaching its expiry), the `oc`/`helm` steps above are moot -- the
+cluster's own API server, and everything defined through it, disappears with
+it. What is **not** covered by a cluster destroy, because these were created
+directly with `gcloud` rather than by anything the OpenShift installer itself
+tracks, is the Cloud VPN (`setup-cloudvpn.sh`) and the two firewall rules
+(`firewall.sh`'s own rule, plus the one `setup-cloudvpn.sh` also creates) --
+run their `cleanup` mode either just before or any time after the cluster is
+gone (`CLUSTER_INFRA_ID=<infra-id>` lets both run without a live cluster to
+query -- see `env.sh`):
+
+```bash
+cd gcp
+CLUSTER_INFRA_ID=ellorent-vlan-evpn-k25qm ./firewall.sh cleanup
+CLUSTER_INFRA_ID=ellorent-vlan-evpn-k25qm ./setup-cloudvpn.sh cleanup
+```
+
+Both are idempotent and safe to rerun; neither touches the shared VPC network
+itself (`${CLUSTER_INFRA_ID}-network`), only the resources they created in it.
+The alias IPs `alias-ip.sh` sets are plain NIC properties of the cluster's own
+instances, not standalone resources -- they disappear with the instances,
+nothing separate to clean up there.
 
 ## Notes and gotchas
 

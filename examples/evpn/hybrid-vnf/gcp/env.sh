@@ -6,11 +6,42 @@
 #
 # Requires: oc (KUBECONFIG set to the cluster) and gcloud (authenticated to the
 # project). Source it: `source ./env.sh`.
+#
+# Cleanup exception: if CLUSTER_INFRA_ID is already set in the environment,
+# all oc-dependent discovery below is skipped entirely -- this lets the
+# `cleanup` mode of firewall.sh/setup-cloudvpn.sh run standalone even after
+# the cluster itself no longer exists (e.g. run right after, rather than
+# before, destroying the cluster), since CLUSTER_INFRA_ID plus the static
+# values in network.env are all cleanup needs; it never touches node lists.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/network.env"
+
+# Fail loudly on broken gcloud auth now, rather than silently later: every
+# calling script's own `if gcloud ... describe ... &>/dev/null` checks (both
+# here and in firewall.sh/setup-cloudvpn.sh, for both create and cleanup)
+# cannot tell "genuinely not found" apart from "gcloud call itself failed" --
+# both return the same non-zero exit code and get swallowed by &>/dev/null.
+# An expired/broken auth session would otherwise make `cleanup` silently
+# report every resource as "already deleted" without actually checking or
+# deleting anything (confirmed: `gcloud ... describe` on a re-auth failure
+# exits 1, identical to a real 404), and would make `create` (in
+# setup-cloudvpn.sh) think nothing exists yet and try to create duplicates.
+if ! gcloud auth print-access-token &>/dev/null; then
+    echo "ERROR: gcloud is not authenticated (or the session expired.)" >&2
+    echo "Run: gcloud auth login" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+if [[ -n "${CLUSTER_INFRA_ID:-}" ]]; then
+    echo "CLUSTER_INFRA_ID already set (${CLUSTER_INFRA_ID}) -- skipping live cluster discovery"
+    export GCP_NETWORK="${CLUSTER_INFRA_ID}-network"
+    export GCP_WORKER_SUBNET="${CLUSTER_INFRA_ID}-worker-subnet"
+    export GCP_MASTER_SUBNET="${CLUSTER_INFRA_ID}-master-subnet"
+    return 0 2>/dev/null || exit 0
+fi
 
 # Infra ID / resource prefix. Everything the scripts create or touch on GCP is
 # scoped to this, because the project is shared with other clusters.

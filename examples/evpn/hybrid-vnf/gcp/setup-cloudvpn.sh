@@ -17,14 +17,21 @@
 # Requires: env.sh sourced (oc + gcloud), SHARED_SECRET and ONPREM_PUBLIC_IP
 # set (network.env or environment). Prints the gateway IP to put in network.env
 # as GCP_VPN_IP for the on-prem side.
+#
+# Usage:
+#   ./setup-cloudvpn.sh            # create/update (default)
+#   ./setup-cloudvpn.sh cleanup    # delete every resource this script made,
+#     in dependency order (route -> tunnel -> forwarding rules -> gateway ->
+#     address -> the vnf-allow-onprem firewall rule). Works even after the
+#     cluster itself is gone (CLUSTER_INFRA_ID=... env.sh skips oc -- see
+#     env.sh), so this can run either just before or any time after
+#     destroying the cluster; the shared VPC network is not touched either
+#     way. Does not need SHARED_SECRET/ONPREM_PUBLIC_IP.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env.sh"
-
-: "${SHARED_SECRET:?set SHARED_SECRET in network.env or the environment}"
-: "${ONPREM_PUBLIC_IP:=$(curl -4 -s ifconfig.me)}"
 
 PROJECT="$GCP_PROJECT_ID"
 REGION="$GCP_REGION"
@@ -32,7 +39,70 @@ NETWORK="$GCP_NETWORK"
 GW="${CLUSTER_INFRA_ID}-vnf-vpn-gw"
 TUNNEL="${CLUSTER_INFRA_ID}-vnf-vpn-tunnel"
 ROUTE="${CLUSTER_INFRA_ID}-vnf-route-onprem"
+FW="${CLUSTER_INFRA_ID}-vnf-allow-onprem"
 gc() { gcloud --project="$PROJECT" "$@"; }
+
+if [[ "${1:-}" == "cleanup" || "${1:-}" == "--cleanup" ]]; then
+    echo "=== Cleaning up GCP Cloud VPN (${CLUSTER_INFRA_ID}) ==="
+
+    echo "[1/6] route ${ROUTE}"
+    if gc compute routes describe "$ROUTE" &>/dev/null; then
+        gc compute routes delete "$ROUTE" --quiet
+        echo "  ✓ deleted"
+    else
+        echo "  ✓ not found (already deleted)"
+    fi
+
+    echo "[2/6] tunnel ${TUNNEL}"
+    if gc compute vpn-tunnels describe "$TUNNEL" --region="$REGION" &>/dev/null; then
+        gc compute vpn-tunnels delete "$TUNNEL" --region="$REGION" --quiet
+        echo "  ✓ deleted"
+    else
+        echo "  ✓ not found (already deleted)"
+    fi
+
+    echo "[3/6] forwarding rules"
+    for proto in esp udp500 udp4500; do
+        rule="${GW}-${proto}"
+        if gc compute forwarding-rules describe "$rule" --region="$REGION" &>/dev/null; then
+            gc compute forwarding-rules delete "$rule" --region="$REGION" --quiet
+            echo "  ✓ deleted ${rule}"
+        else
+            echo "  ✓ ${rule} not found (already deleted)"
+        fi
+    done
+
+    echo "[4/6] gateway ${GW}"
+    if gc compute target-vpn-gateways describe "$GW" --region="$REGION" &>/dev/null; then
+        gc compute target-vpn-gateways delete "$GW" --region="$REGION" --quiet
+        echo "  ✓ deleted"
+    else
+        echo "  ✓ not found (already deleted)"
+    fi
+
+    echo "[5/6] address ${GW}-ip"
+    if gc compute addresses describe "${GW}-ip" --region="$REGION" &>/dev/null; then
+        gc compute addresses delete "${GW}-ip" --region="$REGION" --quiet
+        echo "  ✓ deleted"
+    else
+        echo "  ✓ not found (already deleted)"
+    fi
+
+    echo "[6/6] firewall rule ${FW}"
+    if gc compute firewall-rules describe "$FW" &>/dev/null; then
+        gc compute firewall-rules delete "$FW" --quiet
+        echo "  ✓ deleted"
+    else
+        echo "  ✓ not found (already deleted)"
+    fi
+
+    echo ""
+    echo "done. The shared VPC network (${NETWORK}) itself is never touched."
+    exit 0
+fi
+
+: "${SHARED_SECRET:?set SHARED_SECRET in network.env or the environment}"
+: "${ONPREM_PUBLIC_IP:=$(curl -4 -s ifconfig.me)}"
 
 echo "=== GCP Cloud VPN to on-prem VNF ==="
 echo "  network:   ${NETWORK}"
@@ -81,9 +151,8 @@ if ! gc compute routes describe "$ROUTE" &>/dev/null; then
 fi
 
 echo "[4/5] firewall from ${VNF_VTEP_CIDR} (BGP/VXLAN/ICMP)"
-fw="${CLUSTER_INFRA_ID}-vnf-allow-onprem"
-if ! gc compute firewall-rules describe "$fw" &>/dev/null; then
-    gc compute firewall-rules create "$fw" \
+if ! gc compute firewall-rules describe "$FW" &>/dev/null; then
+    gc compute firewall-rules create "$FW" \
         --network="$NETWORK" \
         --allow=tcp:179,udp:4789,icmp \
         --source-ranges="$VNF_VTEP_CIDR" \

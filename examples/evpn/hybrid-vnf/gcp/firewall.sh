@@ -21,6 +21,12 @@
 # Scoped strictly to the cluster infra ID because the project is shared.
 #
 # Requires: env.sh sourced (gcloud authenticated to the project).
+#
+# Usage:
+#   ./firewall.sh            # create/update the rule (default)
+#   ./firewall.sh cleanup    # delete it
+#     CLUSTER_INFRA_ID=ellorent-vlan-evpn-k25qm ./firewall.sh cleanup
+#       # works even after the cluster itself is gone -- see env.sh
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +36,16 @@ source "${SCRIPT_DIR}/env.sh"
 RULE="${CLUSTER_INFRA_ID}-vtep-underlay"
 RULES="tcp:179,udp:4789,icmp"
 SOURCE_RANGES="${GCP_VTEP_CIDR},${GCP_RR_CIDR}"
+
+if [[ "${1:-}" == "cleanup" || "${1:-}" == "--cleanup" ]]; then
+    if gcloud compute firewall-rules describe "$RULE" --project="$GCP_PROJECT_ID" &>/dev/null; then
+        gcloud compute firewall-rules delete "$RULE" --project="$GCP_PROJECT_ID" --quiet
+        echo "  ✓ deleted ${RULE}"
+    else
+        echo "  ✓ ${RULE} not found (already deleted)"
+    fi
+    exit 0
+fi
 
 if gcloud compute firewall-rules describe "$RULE" --project="$GCP_PROJECT_ID" &>/dev/null; then
     echo "updating existing firewall rule ${RULE}"
