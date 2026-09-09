@@ -1,0 +1,94 @@
+# KubeVirt VM on the stretched L2VNI, replacing the plain pod (vlan-workload)
+# from l2vni.yaml with something that actually represents the ticket's real
+# use case: a VM, not a container, reachable from on-prem with a static IP.
+#
+# Uses the cluster's own auto-imported "fedora" boot source (openshift-
+# virtualization-os-images namespace) via a DataVolumeTemplate clone -- no
+# external image URL needed.
+#
+# Two interfaces:
+#   - default: pod network (masquerade), DHCP -- management/console only.
+#   - l2vni: the stretched L2VNI via the existing vlan-stretch NAD (bridge
+#     binding), static 192.168.100.10/24, no gateway (pure L2, matching the
+#     disconnected L2VNI -- see l2vni.yaml). A fixed MAC is set so cloud-init
+#     can match this specific interface by MAC regardless of what the guest
+#     kernel names it.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vlan-workload-vm
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: vlan-workload-vm
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/worker: ""
+      domain:
+        cpu:
+          cores: 1
+        memory:
+          guest: 1Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+            - name: l2vni
+              bridge: {}
+              macAddress: "02:00:00:00:64:0a"
+      networks:
+        - name: default
+          pod: {}
+        - name: l2vni
+          multus:
+            networkName: vlan-stretch
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: vlan-workload-vm-rootdisk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              password: openpe123
+              chpasswd:
+                expire: false
+              ssh_pwauth: true
+              package_update: false
+              ssh_authorized_keys:
+                - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIYrQWJKivTvTluDE13UkbWH6fFVertd/yTUgGvwTLaF ellorent@fedora
+            networkConfig: |
+              version: 2
+              ethernets:
+                l2vni-nic:
+                  match:
+                    macaddress: "02:00:00:00:64:0a"
+                  set-name: eth1
+                  addresses:
+                    - 192.168.100.10/24
+                  dhcp4: false
+  dataVolumeTemplates:
+    - metadata:
+        name: vlan-workload-vm-rootdisk
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: fedora
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              # Must be >= the fedora DataSource's source snapshot size
+              # (32Gi as imported on this cluster) -- cloning fails
+              # validation otherwise ("target ... smaller than the source").
+              storage: 35Gi
