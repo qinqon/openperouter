@@ -10,10 +10,12 @@
 # The underlay interface is a NetworkDevice: the named interface is moved
 # into the "perouter" netns and used as the VTEP source / VPN egress. It is
 # consumed and cannot be used outside perouter afterwards, so use either:
-#   - a spare/dedicated NIC (USB-eth, VLAN subinterface), or
-#   - (recommended for a laptop with a single uplink) a macvlan sub-interface
-#     in bridge mode on the real uplink, so the physical NIC/its own address
-#     are never touched: e.g.
+#   - a spare/dedicated NIC (USB-eth, VLAN subinterface, a VM's own real NIC
+#     e.g. "enp2s0" -- what this file uses, since this VNF runs inside a
+#     dedicated libvirt VM with its own distinct uplink), or
+#   - (recommended for a bare host with a single, shared uplink) a macvlan
+#     sub-interface in bridge mode on the real uplink, so the physical
+#     NIC/its own address are never touched: e.g.
 #       ip link add macvlan0 link <real-uplink> type macvlan mode bridge
 #       ip addr add <free-LAN-ip>/<prefix> dev macvlan0
 #       ip link set macvlan0 up
@@ -25,12 +27,14 @@
 #     (podman/Docker default bridge networking for this same interface) has
 #     been observed to silently break IKE on some home routers -- see
 #     ../../README.md's "GCP firewall" gotcha for the analogous GCP-side
-#     issue and the README section on this laptop-side NAT constraint.
+#     issue and the README section on this laptop-side NAT constraint. A
+#     dedicated VM sidesteps this: its uplink NIC is never shared with a
+#     management interface, so no macvlan layer is needed at all.
 #
-# Replace "macvlan0" below with your own interface name (max 15 chars) if
+# Replace "enp2s0" below with your own interface name (max 15 chars) if
 # different, and add a default route inside perouter once it's moved (the
 # move restores addresses, not routes):
-#   ip netns exec perouter ip route add default via <LAN-gateway> dev macvlan0
+#   ip netns exec perouter ip route add default via <LAN-gateway> dev enp2s0
 #
 # The 3 neighbor addresses below are derived per-node from the real
 # openpe.io/nodeindex annotation of each GCP control-plane node, not from a
@@ -47,7 +51,7 @@ underlays:
     interfaces:
       - type: NetworkDevice
         networkDevice:
-          interfaceName: macvlan0
+          interfaceName: enp2s0
     neighbors:
       # eBGP multihop to every GCP route reflector, reached over the VPN.
       # Each RR reflects the workers' ipv4-unicast (VTEP reachability) and
