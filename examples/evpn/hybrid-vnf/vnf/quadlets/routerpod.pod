@@ -33,26 +33,6 @@ TimeoutStopSec=70
 ExecStartPre=-/usr/sbin/ip netns add perouter
 ExecStartPre=/usr/sbin/ip netns exec perouter ip link set lo up
 
-# Add perouter's default route once the underlay NetworkDevice interface has
-# been moved in (it preserves addresses but not routes -- see
-# config/configs/openpe_config.yaml). Optional: no-ops when
-# /etc/openpe-vnf/underlay.env is missing or its vars are empty, in which
-# case add the route by hand as documented there.
-#
-# The move itself happens asynchronously inside the controller container's
-# own reconciliation loop (a separate pod/service), not synchronously as
-# part of *this* pod's own ExecStartPre steps -- those only create the
-# empty netns and bring up loopback. On a from-scratch deploy this
-# ExecStartPost fires (podman pod start returns) well before the
-# controller has actually performed the move, so a plain one-shot
-# "ip route replace" here reliably fails with "Cannot find device" on
-# first start (only appearing to work when re-run against an
-# already-populated netns from a prior deploy). Poll for the interface
-# instead, up to 30s. "-" still ignores the final failure if the
-# controller takes even longer than that or UNDERLAY_IFACE is wrong --
-# fall back to the manual step documented above in that case.
-ExecStartPost=-/bin/sh -c '. /etc/openpe-vnf/underlay.env 2>/dev/null; [ -n "$UNDERLAY_IFACE" ] && [ -n "$UNDERLAY_GW" ] || exit 0; for i in $(seq 1 30); do ip netns exec perouter ip link show "$UNDERLAY_IFACE" >/dev/null 2>&1 && break; sleep 1; done; ip netns exec perouter ip route replace default via "$UNDERLAY_GW" dev "$UNDERLAY_IFACE"'
-
 [Install]
 # Automatically enable this pod at boot
 # The systemd-generator will create the necessary symlinks

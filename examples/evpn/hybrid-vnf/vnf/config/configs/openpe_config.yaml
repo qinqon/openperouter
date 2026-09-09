@@ -36,7 +36,8 @@
 # move restores addresses, not routes):
 #   ip netns exec perouter ip route add default via <LAN-gateway> dev enp2s0
 # ...or set UNDERLAY_IFACE/UNDERLAY_GW in ../../gcp/network.env before running
-# deploy.sh, and the routerpod quadlet does this automatically instead.
+# deploy.sh, then run ./add-underlay-route.sh (it waits for the interface,
+# since the controller's move happens asynchronously) to do this for you.
 #
 # The 3 neighbor addresses below are derived per-node from the real
 # openpe.io/nodeindex annotation of each GCP control-plane node, not from a

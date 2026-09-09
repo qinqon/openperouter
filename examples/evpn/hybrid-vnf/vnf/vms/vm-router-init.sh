@@ -55,5 +55,8 @@ source /root/network.env.local
 set +a
 UNDERLAY_IFACE=enp2s0 UNDERLAY_GW='{{ uplink_gw }}' "${VNF_DIR}/deploy.sh"
 
+echo "--- adding perouter's default route (waits for the controller's async interface move) ---"
+UNDERLAY_IFACE=enp2s0 UNDERLAY_GW='{{ uplink_gw }}' "${VNF_DIR}/add-underlay-route.sh" || true
+
 echo "=== vm-router-init: done $(date) ==="
 touch /root/vm-router-init.done

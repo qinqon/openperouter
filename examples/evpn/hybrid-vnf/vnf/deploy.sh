@@ -9,9 +9,14 @@
 #      the FRR config into the well-known host paths,
 #   3. renders the VPN env from network.env,
 #   4. renders the underlay env (UNDERLAY_IFACE/UNDERLAY_GW, both optional --
-#      see network.env) so the routerpod quadlet can add perouter's default
-#      route automatically instead of that being a manual post-step,
+#      see network.env) for add-underlay-route.sh to pick up,
 #   5. installs the quadlets and starts the systemd services.
+#
+# Run ./add-underlay-route.sh afterwards (once UNDERLAY_IFACE/UNDERLAY_GW are
+# set) to add perouter's default route automatically instead of that being a
+# manual post-step -- not done by this script itself, since the underlay
+# interface move happens asynchronously in the controller's own
+# reconciliation loop and can take longer than deploy.sh runs for.
 #
 # Prerequisites: podman, systemd, a spare underlay NIC (set in
 # config/configs/openpe_config.yaml) and the workload VLAN bridge from
