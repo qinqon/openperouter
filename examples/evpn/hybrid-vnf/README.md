@@ -10,6 +10,15 @@ on-prem side is not a Kubernetes cluster but one container-based router that
 also terminates the VPN, so you can exercise the cloud-VPN overhead and the
 VLAN attachment without a second cluster.
 
+Both ends run in a **VM**, not a container or a plain netns: the on-prem VNF
+in a dedicated libvirt VM (`vm-router`), the on-prem workload in a second one
+(`vm-workload`), and the GCP-side workload as a **KubeVirt** `VirtualMachine`
+(not a plain pod) -- closer to the actual scenario this example is meant to
+de-risk (migrating a VM's network attachment, not a container's). The two
+on-prem VMs are provisioned and fully configured with **no manual SSH steps**
+via [kcli](https://kcli.readthedocs.io) + cloud-init -- see "On-prem VM
+provisioning" below.
+
 **Status: verified working end-to-end, laptop to GCP**, for everything this
 example is responsible for, including genuine 802.1Q VLAN tag handling:
 IPsec tunnel established; all 3 on-prem-to-RR eBGP sessions up
@@ -19,9 +28,9 @@ boundary; the on-prem VXLAN device came up with all 3 worker VTEPs as
 head-end-replication flood targets; genuine EVPN Type-2 (MAC) routes
 exchanged in both directions (not just VXLAN flood-and-learn); MTU
 correctly accounted for on both sides (see the MTU gotcha); and
-bidirectional 300KB TCP transfers between a real on-prem workload and the
-GCP pod completed with 0 bytes lost (MD5-verified) at realistic,
-everyday-file-size scale, not just small pings.
+bidirectional 300KB TCP transfers between the on-prem `vm-workload` VM and
+the GCP KubeVirt VM completed with 0 bytes lost (MD5-verified) at
+realistic, everyday-file-size scale, not just small pings.
 
 An earlier version of this test used a plain veth attached directly to
 `br-vlan`, bypassing 802.1Q tag processing entirely -- real, but only of
@@ -29,34 +38,40 @@ OpenPERouter's own bridging/EVPN/VXLAN path, not of the VLAN-tagging
 mechanics this example's own instructions assume. That gap is now closed:
 `sim-switch-setup.sh` builds a genuine VLAN-aware Linux bridge as a
 simulated switch (a real trunk port carrying tagged frames to the VNF, a
-real access port carrying plain untagged frames to an external host
-netns), so the same kernel 802.1Q code a physical switch and NIC would
-use is genuinely exercised -- confirmed directly with `tcpdump`: identical
-ICMP exchanges show `vlan 100` tags on the trunk port and no tag at all on
-the access port. See "Test the stretch" below for the full setup and
-results. What remains unverified is only physical hardware itself (a real
-NIC/driver and a real switch), which is a much smaller, lower-risk gap
-than the VLAN-tagging mechanics were.
+real access port carrying plain untagged frames to the on-prem workload),
+so the same kernel 802.1Q code a physical switch and NIC would use is
+genuinely exercised -- confirmed directly with `tcpdump`: identical ICMP
+exchanges show `vlan 100` tags on the trunk port and no tag at all on the
+access port. Both switch ports now carry a **real VM's** traffic (libvirt
+taps into `vm-router`/`vm-workload`, not a software-only veth pair used
+only for the initial tagging proof) -- see "Test the stretch" below for
+the full setup and results. What remains unverified is only physical
+hardware itself (a real NIC/driver and a real switch), which is a much
+smaller, lower-risk gap than the VLAN-tagging mechanics were.
 
 ```
---- DIAGRAM 1: on-prem -- real 802.1Q VLAN simulation feeding the VNF ---
+--- DIAGRAM 1: on-prem -- two libvirt VMs + a simulated VLAN switch ---
 
-+--------------+            +----------------+            +-------------+
-|   host-nic   |            | sw-access-port |            |   vnf-nic   |
-|   .200/24    |            |   (untagged,   |            | vnf-nic.100 |
-|  (plain, no  |            |    PVID 100)   |            | (strips the |
-| VLAN aware-  |-- plain -->|                | vlan 100 ->| 802.1Q tag) |
-| ness at all) |            | sw-trunk-port  |            |   mtu 1450  |
-+--------------+            |    (tagged,    |            +-------------+
-                            |    vlan 100)   |
-                            +----------------+
++--------------+              +----------------+              +--------------+
+| vm-workload  |              | sw-access-port |              |  vm-router   |
+|    enp2s0    |              |   (untagged,   |              |    enp3s0    |
+|   .200/24    |              |   PVID 100)    |              |  enp3s0.100  |
+|  (plain, no  | -- plain --> |                | vlan 100 --> | (strips the  |
+| VLAN aware-  |              | sw-trunk-port  |              | 802.1Q tag)  |
+| ness at all) |              |    (tagged,    |              +--------------+
++--------------+              |   vlan 100)    |
+                              +----------------+
 
-                                                                 |
-                                                                 v
-                                                           +----------+
-                                                           | br-vlan  |
-                                                           | mtu 1450 |
-                                                           +----------+
+                              (sim-switch bridge: real VM taps, not test
+                               veth pairs -- vnetN <-> access port,
+                               vnetM <-> trunk port)
+
+                                                                      |
+                                                                      v
+                                                                +----------+
+                                                                | br-vlan  |
+                                                                | mtu 1450 |
+                                                                +----------+
 
          |
          v
@@ -68,7 +83,7 @@ than the VLAN-tagging mechanics were.
 | +------------+    | (VXLAN,  |    +-----------+    +----------+      |
 |                   | vni 110) |                                       |
 |                   +----------+                                       |
-| ^ all 4 above: mtu 1450 (auto-derived: macvlan0 mtu 1500 - 50 VXLAN) |
+| ^ all 4 above: mtu 1450 (auto-derived: enp2s0 mtu 1500 - 50 VXLAN)   |
 |                                                                      |
 |                         |                                            |
 |                         v                                            |
@@ -78,7 +93,7 @@ than the VLAN-tagging mechanics were.
 |                 +---------------+                                    |
 |                                                                      |
 | +----------+   +-------------+   +----------------+                  |
-| |   FRR    |---|  strongSwan |---|    macvlan0    |                  |
+| |   FRR    |---|  strongSwan |---|     enp2s0     |                  |
 | | AS 64514 |   | (IPsec/VPN) |   |   (underlay    |                  |
 | +----------+   +-------------+   |     uplink)    |                  |
 |                                  |    mtu 1500    |                  |
@@ -87,6 +102,14 @@ than the VLAN-tagging mechanics were.
 |                                  |  see MTU note) |                  |
 |                                  +----------------+                  |
 +----------------------------------------------------------------------+
+
+The whole "netns perouter" box above runs inside vm-router. enp2s0 is a
+macvtap interface (bridge mode) on the laptop's real physical uplink NIC,
+giving the VM a genuine single-NAT-hop LAN presence -- the same property
+the bare-host "macvlan0 sub-interface" trick has (see
+config/configs/openpe_config.yaml), but without needing that trick at all:
+a VM's NIC is never shared with a management interface the way a bare
+laptop's single physical NIC is.
 
 --- DIAGRAM 2: cross-cloud -- on-prem VNF <-> GCP over the VPN ---
 
@@ -117,8 +140,8 @@ iBGP route reflection
                          |         GCP_VTEP_CIDR 10.0.200.0/24          |
                          |            ipvlan net1: mtu 1430             |
                          |   veth/br-hs-110: mtu 1380 (auto: 1430-50)   |
-                         | pod NAD net1: mtu 1380 (explicit, unmanaged) |
-                         |       pod vlan-workload 192.168.100.10       |
+                         |     NAD: mtu 1380 (explicit, unmanaged)      |
+                         | KubeVirt VM vlan-workload-vm 192.168.100.10  |
                          +----------------------------------------------+
 
 Logical BGP/EVPN relationships (both ride over the IPsec tunnel + VPC
@@ -129,8 +152,8 @@ route shown in diagram 2, not separate physical links):
     next-hop, so VXLAN data-plane traffic never actually transits the RRs
 
 Shared L2 segment: L2VNI 110, subnet 192.168.100.0/24
-  ext-host <-802.1Q-> switch <-untag-> vnf-nic.100 <-> br-vlan <-> perouter
-      <--IPsec/VPN--> Cloud VPN GW --VPC--> worker VTEP <-> br-hs-110 <-> pod
+  vm-workload <-802.1Q-> sim-switch <-untag-> enp3s0.100 <-> br-vlan <-> perouter
+      <--IPsec/VPN--> Cloud VPN GW --VPC--> worker VTEP <-> br-hs-110 <-> vlan-workload-vm
 
 MTU chain -- measured safe end-to-end size: 1380 bytes (IP-layer).
 OpenPERouter auto-derives each L2VNI veth as (underlay iface mtu) - 50
@@ -138,15 +161,15 @@ OpenPERouter auto-derives each L2VNI veth as (underlay iface mtu) - 50
 that interface is the one correct, reconcile-safe place to also account
 for IPsec -- but ONLY where that interface does not itself carry IPsec:
 
-  GCP (static fix, safe):  net1 mtu 1430 --auto--> veth/pod mtu 1380
+  GCP (static fix, safe):  net1 mtu 1430 --auto--> veth/VM mtu 1380
     worker VM's kernel never does IPsec (Cloud VPN gateway terminates
     it), so net1 only ever carries plain VXLAN -- shrinking it is safe.
-    The pod's own NAD interface is a separate, OpenPERouter-unmanaged
-    veth and needs its OWN explicit mtu 1380, or it silently keeps 1500.
+    The NAD's own interface is a separate, OpenPERouter-unmanaged veth
+    and needs its OWN explicit mtu 1380, or it silently keeps 1500.
 
-  on-prem (dynamic, NOT a static fix): macvlan0 mtu 1500 (unchanged)
+  on-prem (dynamic, NOT a static fix): enp2s0 mtu 1500 (unchanged)
     --auto--> veth/br-vlan mtu 1450 (VXLAN-only aware)
-    macvlan0 is ALSO the interface strongSwan's ESP output must fit
+    enp2s0 is ALSO the interface strongSwan's ESP output must fit
     through (perouter's netns is shared by VXLAN and the VPN sidecar).
     Shrinking it double-counts IPsec overhead and starves ESP's own
     transmission budget -- tried and measured making this WORSE (1316
@@ -192,16 +215,41 @@ resulting Underlay CRs (`route-reflectors`, `workers`).
 
 ```
 vnf/                     on-prem VNF (systemd/Podman, static config, no k8s)
+                         -- runs inside the vm-router libvirt VM
   quadlets/              routerpod + frr + reloader + vpn sidecar + controller + volume
   Dockerfile.vpn         strongSwan sidecar image
   config/                node-config.yaml + configs/openpe_config.yaml (static)
   frrconfig/             FRR seed files
   start-vpn.sh           strongSwan config + load (runs in perouter netns)
-  underlay-setup.sh      create the macvlan underlay uplink (router side)
   vlan-setup.sh          create br-vlan + VLAN subinterface (workload side)
-  sim-switch-setup.sh    TEST-ONLY: simulate a real VLAN-trunked switch +
-                         external host, for exercising vlan-setup.sh's
-                         actual 802.1Q code path without physical hardware
+  add-underlay-route.sh  add perouter's default route once the underlay
+                         interface is moved in (waits for the controller's
+                         async move; see deploy.sh/network.env)
+  libvirt-host-setup.sh  fix Docker's iptables FORWARD policy silently
+                         blocking libvirt NAT traffic (needed for
+                         vm-router's/vm-workload's mgmt NIC to reach the
+                         internet at all)
+  sim-switch-setup.sh    build the VLAN-aware Linux bridge ("sim-switch")
+                         that vm-router's/vm-workload's sim-switch NICs
+                         attach to -- a real trunk port carrying tagged
+                         frames to vm-router, a real access port carrying
+                         plain untagged frames to vm-workload
+  underlay-setup.sh      ALTERNATIVE to the VM approach: create a macvlan
+                         underlay uplink directly on a bare host (no
+                         libvirt) -- see "On-prem: bare host" below
+  vms/                   kcli + cloud-init: provisions vm-router and
+                         vm-workload with no manual SSH steps
+    kcli-plan.yml        defines both VMs (nets, disks, cloud-init)
+    vm-router-init.sh    cloud-init script: packages, SELinux workaround,
+                         clones this repo, runs vlan-setup.sh + deploy.sh
+                         + add-underlay-route.sh -- all automatic
+    fix-vlan-membership.sh
+                         set each VM's sim-switch tap to the correct VLAN
+                         (kcli/libvirt has no concept of sim-switch's own
+                         VLAN filtering) -- run once, right after
+                         `kcli create plan`
+    secrets.yml.sample   template for the gitignored secrets.yml paramfile
+                         (SHARED_SECRET/GCP_VPN_IP -- never committed)
   deploy.sh/undeploy.sh  install/remove quadlets and static config
   verify.sh              VPN/BGP/EVPN/datapath checks
 gcp/                     GCP OpenShift side (OpenPERouter in Kubernetes mode)
@@ -214,32 +262,41 @@ gcp/                     GCP OpenShift side (OpenPERouter in Kubernetes mode)
   firewall.sh            intra-cluster BGP+VXLAN firewall rule (see gotcha below)
   alias-ip.sh            register every node's derived address as an alias IP
   setup-cloudvpn.sh      Classic Cloud VPN to the laptop + route + firewall
-  l2vni.yaml             stretched L2VNI (workers only) + NAD + workload pod
+  l2vni.yaml             stretched L2VNI (workers only) + NAD
+  vm-workload.yaml       KubeVirt VirtualMachine on the L2VNI (the actual
+                         workload; l2vni.yaml only sets up its network)
 kubeconfig.sh            pull the cluster kubeconfig from the Jenkins artifact
 ```
 
 ## Prerequisites
 
-- **On-prem (laptop):** Podman + systemd, root, and a NIC for the workload
-  VLAN. For the underlay uplink (moved into the router netns, unusable
-  outside it afterwards), either a spare/dedicated NIC, or -- recommended,
-  and what was actually used for the verified run below -- a **macvlan
-  sub-interface** on the laptop's real uplink via `underlay-setup.sh`, so the
-  physical NIC and its own address are never touched. A public IP reachable
-  by GCP for the VPN (behind NAT is fine; see the NAT gotcha below).
+- **On-prem (laptop):** libvirt/KVM and [kcli](https://kcli.readthedocs.io)
+  (`sudo dnf -y copr enable karmab/kcli && sudo dnf -y install kcli`; run
+  kcli itself as a user in the `libvirt`/`qemu` groups, not via `sudo` --
+  see kcli's own "Libvirt additional configuration" docs and
+  `vnf/vms/kcli-plan.yml`'s header comment). A downloaded Fedora Cloud image
+  (`kcli download image fedora44`). A public IP reachable by GCP for the VPN
+  (behind NAT is fine; see the NAT gotcha below) -- this is the laptop's
+  own uplink, used by `vm-router` via a macvtap NIC, not anything you set
+  up yourself.
+  - **Alternative, no libvirt/VMs at all:** the VNF can still run directly
+    on the bare laptop via Podman + systemd -- see "On-prem: bare host"
+    under Run below. Everything else in this README (GCP side, gotchas,
+    MTU chain, VLAN tagging) is identical either way; only how the on-prem
+    side is hosted differs.
 - **GCP:** an OpenShift cluster (this PoC targets `ellorent-vlan-evpn`, CNV
-  4.22, 3 masters + 3 workers), `oc` with its kubeconfig, and `gcloud`
-  authenticated to the project (`gcloud auth login`, or a valid
-  `gcloud auth application-default login` token -- every script here also
-  accepts `CLOUDSDK_AUTH_ACCESS_TOKEN` for non-interactive use). The project
-  is shared, so every GCP resource this example creates is scoped to the
-  cluster infra ID.
-- No persistent storage / VMs are required -- the workload is a plain pod.
+  4.22, 3 masters + 3 workers) with **OpenShift Virtualization (CNV)
+  installed** (for the `vlan-workload-vm` KubeVirt VM), `oc` with its
+  kubeconfig, and `gcloud` authenticated to the project (`gcloud auth
+  login`, or a valid `gcloud auth application-default login` token -- every
+  script here also accepts `CLOUDSDK_AUTH_ACCESS_TOKEN` for non-interactive
+  use). The project is shared, so every GCP resource this example creates
+  is scoped to the cluster infra ID.
 
 ## Run
 
 Fill in the VPN parameters in `gcp/network.env` (`SHARED_SECRET`, and after the
-VPN is created, `GCP_VPN_IP`), and set the underlay/VLAN NIC names.
+VPN is created, `GCP_VPN_IP`).
 
 ### 1. GCP side
 
@@ -252,19 +309,19 @@ source network.env                 # SHARED_SECRET, ONPREM_PUBLIC_IP (or autodet
 ./underlay.sh                      # route-reflectors (control-plane) + workers Underlays
 ./alias-ip.sh                      # register every derived address as an alias IP
 ./setup-cloudvpn.sh                # Cloud VPN to the laptop -> prints GCP_VPN_IP
-oc apply -f l2vni.yaml             # stretched L2VNI (workers) + NAD + workload pod
+oc apply -f l2vni.yaml             # stretched L2VNI (workers) + NAD
+oc apply -f vm-workload.yaml       # KubeVirt VM workload on that NAD
 ```
 
 Put the printed `GCP_VPN_IP` into `network.env`. `underlay.sh` and
 `alias-ip.sh` read each node's real `openpe.io/nodeindex` annotation, so
 `install.sh` (or at least the controller being up) must run first.
 
-### 2. On-prem VNF (laptop, as root)
+### 2. On-prem VM provisioning
 
-Edit `vnf/config/configs/openpe_config.yaml`: set the underlay `interfaceName`
-(default `macvlan0`, matching `underlay-setup.sh` below) and replace the 3
-route reflector addresses (checked in from a past run, and specific to that
-cluster instance/rebuild) with the real ones for your cluster, printed by:
+Edit `vnf/config/configs/openpe_config.yaml`: replace the 3 route reflector
+addresses (checked in from a past run, and specific to that cluster
+instance/rebuild) with the real ones for your cluster, printed by:
 
 ```bash
 cd gcp && source env.sh && source network.env && source vtep.sh
@@ -274,130 +331,176 @@ for n in "${MASTER_NODES[@]}"; do vtep_ip_for_node "$n" "$GCP_RR_CIDR"; done
 Then, from `vnf/`:
 
 ```bash
+# One-time host prerequisites (idempotent, safe to rerun):
+sudo UPLINK_NIC=<real-uplink> ./libvirt-host-setup.sh   # Docker/libvirt fix
+sudo ./sim-switch-setup.sh                              # VLAN-aware bridge
+
+cd vms
+cp secrets.yml.sample secrets.yml    # fill in SHARED_SECRET, GCP_VPN_IP
+                                      # (gitignored -- never commit this file)
+
+# Provisions vm-router and vm-workload. Run as a user in the "libvirt"/
+# "qemu" groups, not via sudo -- see kcli-plan.yml's own header comment.
+kcli create plan -f kcli-plan.yml \
+  -P uplink_nic=<real-uplink> -P uplink_ip=<free-LAN-ip> \
+  -P uplink_gw=<LAN-gateway> --paramfile secrets.yml \
+  hybrid-vnf-onprem
+
+./fix-vlan-membership.sh   # required -- see the script's own header comment
+```
+
+That's it: cloud-init inside `vm-router` handles everything else
+automatically -- package installs, the SELinux workaround, cloning this
+repo, `vlan-setup.sh`, `deploy.sh`, and `add-underlay-route.sh` -- with no
+manual SSH steps. It takes a couple of minutes (a base-image systemd
+upgrade plus the VPN sidecar image build/pull); watch progress with:
+
+```bash
+ssh fedora@$(sudo virsh domifaddr vm-router | awk '/ipv4/{print $4}' | cut -d/ -f1) \
+  'sudo cloud-init status --wait; sudo tail -20 /var/log/vm-router-init.log'
+```
+
+Then, from inside `vm-router` (or via the same `ssh` prefix):
+
+```bash
+sudo ./verify.sh   # VPN/BGP/EVPN checks (repo path: ~/openperouter/examples/evpn/hybrid-vnf/vnf)
+```
+
+`verify.sh` should show the IPsec SA `ESTABLISHED`, all 3 route reflectors
+`Established` in both `show bgp summary` address families, and EVPN Type-3
+routes for all 3 GCP worker VTEPs under `show bgp l2vpn evpn`. If BGP looks
+healthy but `show evpn vni 110` reports "VNI 110 does not exist", force a
+fresh reconcile with `sudo systemctl restart controllerpod-pod.service`
+(not `podman restart controller` directly -- quadlet-managed pods track
+state through the systemd unit, and bypassing it can leave the unit
+thinking the pod is down even though podman restarted it fine).
+
+#### On-prem: bare host
+
+The VNF can also run directly on a bare host (Podman + systemd, root, no
+libvirt/VMs at all) instead of inside `vm-router` -- useful if you don't
+want to set up libvirt, or don't have a spare machine for it. Everything
+else in this README is identical either way.
+
+```bash
 # Underlay uplink: a macvlan sub-interface on the real uplink NIC, not the
-# NIC itself (see "Prerequisites"). Must exist with a real address BEFORE
-# deploy.sh runs -- NetworkDevice only moves an interface and restores
-# whatever address it already had, it never assigns one itself.
+# NIC itself. Must exist with a real address BEFORE deploy.sh runs --
+# NetworkDevice only moves an interface and restores whatever address it
+# already had, it never assigns one itself.
 UNDERLAY_NIC=<real-uplink> UNDERLAY_IP=<free-LAN-ip>/<prefix> \
   UNDERLAY_GW=<LAN-gateway> ./underlay-setup.sh
 
 VLAN_NIC=eth2 VLAN_ID=100 ./vlan-setup.sh                 # workload VLAN bridge
+```
 
+Edit `vnf/config/configs/openpe_config.yaml`'s underlay `interfaceName` to
+`macvlan0` (see its own comment for why a VM's real NIC needs no such
+trick, but a bare host with one shared uplink does), then:
+
+```bash
 # SKIP_VPN_IMAGE_BUILD=1 if rootful `podman build` on this host cannot reach
 # the internet (see gotcha below) and you already loaded the image rootless.
 NETWORK_ENV=../gcp/network.env sudo -E ./deploy.sh        # start the VNF
 
-# The move into perouter preserves the uplink's address but not a default
-# route -- add one once perouter exists (deploy.sh has run):
-sudo ip netns exec perouter ip route add default via <LAN-gateway> dev macvlan0
+./add-underlay-route.sh   # add perouter's default route (waits for the
+                           # controller's async interface move); or set
+                           # UNDERLAY_IFACE/UNDERLAY_GW in network.env
+                           # beforehand and deploy.sh renders them for you
 
 sudo ./verify.sh                                          # VPN/BGP/EVPN checks
 ```
 
-At this point `verify.sh` should show the IPsec SA `ESTABLISHED`, all 3 route
-reflectors `Established` in both `show bgp summary` address families, and
-EVPN Type-3 routes for all 3 GCP worker VTEPs under `show bgp l2vpn evpn`.
-`show evpn vni 110` reporting "VNI 110 does not exist" at this stage is
-expected -- the L2VNI only attaches once `vlan-setup.sh`'s `br-vlan` exists,
-which the commands above already create; if this step ran before `br-vlan`
-existed, restart it once via `sudo systemctl restart
-controllerpod-pod.service` (not `podman restart controller` directly --
-quadlet-managed pods track state through the systemd unit, and bypassing it
-can leave the unit thinking the pod is down even though podman restarted it
-fine) to force a fresh reconcile.
-
 ### 3. Test the stretch
 
-GCP pod `vlan-workload` gets an address from `192.168.100.0/24` on the NAD
-(`192.168.100.10` in the verified run). Give an on-prem host on the VLAN an
-address in the same subnet (avoid `.10`-`.100`, the GCP NAD's whereabouts
-range) and ping the pod (and vice-versa). Traffic flows: on-prem host ->
-switch (tags VLAN 100) -> VNF NIC (`.100` subinterface strips the tag) ->
-`br-vlan` -> VNF L2VNI -> VXLAN over VPN -> GCP `br-hs-110` -> pod.
+The GCP KubeVirt VM `vlan-workload-vm` has a static address on
+`192.168.100.0/24` set via cloud-init (`192.168.100.10`, see
+`gcp/vm-workload.yaml`). `vm-workload` (on-prem) has a static address on the
+same subnet (`192.168.100.200`, set by `kcli-plan.yml`'s `workload_ip`
+parameter). Traffic flows: `vm-workload` -> `sim-switch` (tags VLAN 100) ->
+`vm-router`'s `enp3s0.100` (strips the tag) -> `br-vlan` -> VNF L2VNI ->
+VXLAN over VPN -> GCP `br-hs-110` -> `vlan-workload-vm`.
 
-Without a real switch and a second physical host handy, `sim-switch-setup.sh`
-builds both in software: a VLAN-aware Linux bridge as the switch (a real
-trunk port carrying `vlan-setup.sh`'s tagged VLAN to the VNF, a real access
-port carrying plain untagged Ethernet to an external host netns -- exactly
-how a real end-user device connects, since almost no real host runs 8021q
-itself). This is not a stand-in for tagging: the switch bridge's VLAN
+`sim-switch-setup.sh` (already run once as a prerequisite in step 2) builds
+a genuine VLAN-aware Linux bridge as the simulated switch: a real trunk
+port carrying `vlan-setup.sh`'s tagged VLAN to `vm-router`, a real access
+port carrying plain untagged Ethernet to `vm-workload` -- exactly how a
+real end-user device connects, since almost no real host runs 8021q
+itself. This is not a stand-in for tagging: the switch bridge's VLAN
 filtering is the same kernel code a real switch ASIC/software switch uses,
-and `vlan-setup.sh`'s `.100` subinterface on the trunk side does genuine
-tag stripping/insertion, not a bypass.
+`vlan-setup.sh`'s `.100` subinterface on the trunk side does genuine tag
+stripping/insertion, and (unlike an earlier version of this test) both
+switch ports now carry a **real VM's** traffic via real libvirt taps, not
+a software-only veth pair.
 
 ```bash
-# Builds sim-switch (bridge), vnf-nic<->sw-trunk-port (tagged),
-# host-nic<->sw-access-port (untagged/PVID) in netns ext-host with
-# 192.168.100.200/24. See the script's own comments for all the knobs.
-sudo ./sim-switch-setup.sh
-
-# Feed the trunk-side veth into vlan-setup.sh as its real VLAN_NIC -- this
-# is the exact same script/path a real deployment uses, just pointed at a
-# veth instead of a physical NIC:
-sudo VLAN_NIC=vnf-nic VLAN_ID=100 ./vlan-setup.sh
-sudo ip link set vnf-nic.100 mtu 1450   # match br-vlan; see the MTU gotcha
-
-# force a reconcile so the controller attaches L2VNI 110 to the now-existing
-# br-vlan (see the "controller restart" note in step 2) -- do this via
-# systemctl, not `podman restart controller` directly: quadlet-managed pods
-# track state through the unit, and bypassing it can leave the unit thinking
-# the pod is down even though podman restarted it fine.
-sudo systemctl restart controllerpod-pod.service
-
-sudo ip netns exec ext-host ping -c 5 192.168.100.10
+VM_ROUTER_IP=$(sudo virsh domifaddr vm-router | awk '/ipv4/{print $4}' | cut -d/ -f1)
+VM_WORKLOAD_IP=$(sudo virsh domifaddr vm-workload | awk '/ipv4/{print $4}' | cut -d/ -f1)
+ssh fedora@"${VM_WORKLOAD_IP}" ping -c 5 192.168.100.10
 ```
 
 **Verify the tagging itself is real**, not assumed, by capturing the same
-ping on both switch ports at once:
+ping on both switch ports at once (find the current tap names with
+`sudo virsh domiflist vm-router`/`vm-workload` -- they change across VM
+recreations, unlike `sim-switch-setup.sh`'s own fixed `sw-trunk-port`/
+`sw-access-port` names from its now-superseded veth-based test mode):
 ```bash
-sudo tcpdump -nnei sw-trunk-port icmp &   # expect: vlan 100 tag visible
-sudo tcpdump -nnei sw-access-port icmp &  # expect: plain Ethernet, no tag
-sudo ip netns exec ext-host ping -c 3 192.168.100.10
+sudo tcpdump -nnei <vm-router's sim-switch tap> icmp &    # expect: vlan 100 tag visible
+sudo tcpdump -nnei <vm-workload's sim-switch tap> icmp &  # expect: plain Ethernet, no tag
+ssh fedora@"${VM_WORKLOAD_IP}" ping -c 3 192.168.100.10
 ```
 Confirmed: the identical ICMP exchange (same id/seq, same MACs) shows
-`ethertype 802.1Q (0x8100)...vlan 100` on the trunk port and plain
-`ethertype IPv4` with no tag at all on the access port -- the switch is
+`ethertype 802.1Q (0x8100)...vlan 100` on the trunk-side tap and plain
+`ethertype IPv4` with no tag at all on the access-side tap -- the switch is
 genuinely adding/removing the tag, not passing it through untouched.
 
-**Verified working, bidirectionally**, through this real VLAN path
-(on-prem laptop to `ellorent-vlan-evpn-k25qm`):
+**Verified working, bidirectionally**, through this real VLAN path, real
+VMs on both ends (on-prem laptop to `ellorent-vlan-evpn-k25qm`):
 - Ping: 0% loss, ~100ms RTT (matching the VPN's own latency).
 - MTU boundary holds exactly as measured (see the MTU gotcha): 1380 bytes
-  (IP-layer) 0% loss, 1381 bytes cleanly rejected -- re-confirmed through
-  the real tagged path, not just the earlier bridge-only test.
+  (IP-layer) 0% loss, 1381 bytes cleanly rejected (`ping -M do -s 1352`/
+  `-s 1353` from `vm-workload`) -- re-confirmed through the real tagged,
+  real-VM path, not just the earlier bridge-only or pod-based tests.
 - `show evpn vni 110` on-prem: VXLAN device up, all 3 GCP worker VTEPs as
   head-end-replication flood targets.
-- `show evpn mac vni 110` on-prem, after the ping: `ext-host`'s **real**
-  MAC (`host-nic`'s own address, arriving after genuine tag stripping)
-  learned as `local`, and the GCP pod's MAC learned as `remote` via VTEP
-  `10.0.200.1` -- a genuine EVPN Type-2 route, not flood-and-learn.
-- The same `show evpn mac vni 110` on GCP's worker-a router pod: `ext-host`'s
-  MAC learned as `remote` via VTEP `100.65.0.0` -- confirming Type-2 routes
+- `show evpn mac vni 110` on-prem, after the ping: `vm-workload`'s **real**
+  MAC (its `enp2s0`'s own address, arriving after genuine tag stripping)
+  learned as `local`, and `vlan-workload-vm`'s MAC learned as `remote` via
+  VTEP `10.0.200.1` -- a genuine EVPN Type-2 route, not flood-and-learn.
+- The same MAC table on GCP's worker-a router pod: `vm-workload`'s MAC
+  learned as `remote` via VTEP `100.65.0.0` -- confirming Type-2 routes
   flow both ways across the tunnel, originating from a MAC that only ever
   existed behind the simulated access port.
 - **Real bulk TCP transfers, both directions**: 300KB of random data via
-  plain `nc`, GCP pod to `ext-host` and back, using the pod's own
-  `curl`/`nc` (available in the `agnhost` image) and a netns-local listener
-  on the on-prem side:
+  plain `nc`, `vlan-workload-vm` to `vm-workload` and back, using
+  `virtctl ssh` for the GCP VM (its `nc`/`ncat` is nmap-ncat syntax, not
+  BusyBox -- `nc -l 5002`, not `nc -l -p 5002`, for listen mode) and a
+  plain `ssh` to `vm-workload`:
   ```bash
-  # GCP pod -> ext-host (run the receiver first, then the sender)
-  sudo ip netns exec ext-host nc -l -p 5001 > received.dat &
-  oc exec -n default vlan-workload -- sh -c \
-    "head -c 307200 /dev/urandom | tee /tmp/sent.dat | nc 192.168.100.200 5001"
-  # compare: md5sum received.dat vs oc exec ... md5sum /tmp/sent.dat
+  # vlan-workload-vm -> vm-workload (start the receiver first)
+  ssh fedora@"${VM_WORKLOAD_IP}" 'nc -l 5002 > received.dat' &
+  virtctl ssh fedora@vmi/vlan-workload-vm -n default \
+    -c "head -c 307200 /dev/urandom | tee /tmp/sent.dat | nc -N 192.168.100.200 5002"
+  # compare: md5sum on both sides
   ```
   Both directions: exactly 307200 bytes received, MD5 identical to what was
   sent -- 0 bytes lost or corrupted across roughly 215 TCP segments per
   transfer, each constrained by the fixed MTU chain end to end, and each
   one genuinely crossing the simulated trunk/access ports with real 802.1Q
-  tags added and removed in transit.
+  tags added and removed in transit, between two real VMs.
 
 ## Teardown
 
 ```bash
-# on-prem
+# on-prem VMs (deletes vm-router and vm-workload; the sim-switch bridge and
+# its keepalive port are left as-is -- delete manually if desired:
+# sudo ip link delete sim-switch)
+cd vnf/vms && kcli delete plan hybrid-vnf-onprem
+
+# on-prem bare host, if you used that path instead
 sudo ./vnf/undeploy.sh
+
 # GCP
+oc delete -f gcp/vm-workload.yaml
 oc delete -f gcp/l2vni.yaml
 oc delete underlay -n openperouter-system route-reflectors workers
 helm uninstall openperouter -n openperouter-system
@@ -441,11 +544,81 @@ oc delete namespace openperouter-system
   gets an immediate, valid IKE response. This looks like a common consumer
   router firmware bug around "IPsec/VPN passthrough" ALG handling of
   doubly-NATed traffic, not anything specific to this example. `perouter`'s
-  `NetworkDevice` uplink is already a single NAT hop once it is a real or
-  macvlan interface (see `underlay-setup.sh` and "Prerequisites") -- the
-  failure mode only shows up if you instead try to give the VPN container its
-  own ordinary container-engine network (podman/Docker default bridge) for
-  its uplink.
+  `NetworkDevice` uplink is already a single NAT hop once it is a real,
+  macvlan, or (inside `vm-router`) macvtap interface -- the failure mode
+  only shows up if you instead try to give the VPN container its own
+  ordinary container-engine network (podman/Docker default bridge) for its
+  uplink. A VM's macvtap NIC on the physical uplink has exactly the same
+  single-NAT-hop property as the bare host's macvlan sub-interface (see
+  `underlay-setup.sh`), which is why `vm-router`'s `enp2s0` needs no special
+  setup for this beyond `kcli-plan.yml`'s own network definition.
+- **Docker silently blocks libvirt NAT traffic on a host running both.**
+  Docker sets the classic iptables `filter` table's `FORWARD` chain default
+  policy to `DROP` (a deliberate Docker security measure, applied globally,
+  independent of firewalld/nftables' own tables). Since libvirt's `virbr0`
+  forwarding isn't explicitly permitted by any of Docker's own chains, it
+  silently falls through to that `DROP`. Symptom: `vm-router`'s/
+  `vm-workload`'s management NIC has **no outbound connectivity at all**
+  (not even ICMP) despite routing, `rp_filter`, and firewalld's own zone
+  chains all looking correct -- confirmed via `nft monitor trace`: every
+  firewalld/libvirt chain shows `policy accept`, then Docker's own
+  `ip filter FORWARD`'s `policy drop` is what actually kills the packet.
+  This blocks cloud-init's own package installs/image pulls inside
+  `vm-router`, so it must be fixed *before* `kcli create plan`.
+  `libvirt-host-setup.sh` adds the fix (an explicit `ACCEPT` rule in
+  `DOCKER-USER`, the chain Docker reserves for user customizations and
+  never overwrites) -- but it does **not** survive a host reboot, so rerun
+  it after one.
+- **A Fedora Cloud image's `/sys` mountpoint can be mislabeled for
+  SELinux**, apparently inherited from however that particular image build
+  was produced (observed AVC denial: `mock_var_lib_t` instead of
+  `sysfs_t`). Symptom: `routerpod-pod.service`'s `ExecStartPre` (`ip netns
+  exec perouter ip link set lo up`) fails with "mount of /sys failed:
+  Permission denied" -- but only when launched by systemd (which SELinux
+  policy transitions into the more restricted `ifconfig_t` domain for
+  `/usr/sbin/ip`), not when run interactively (`unconfined_t` bypasses the
+  check), which makes it look like a systemd-specific bug at first. `touch
+  /.autorelabel; reboot` does **not** fix it: the mislabel is on the
+  mountpoint directory itself, permanently hidden under the live sysfs
+  mount once anything is mounted there, so a normal relabel pass never
+  reaches it (confirmed: still denied after a full autorelabel). Properly
+  fixing the hidden label would mean unmounting `/sys` in an isolated mount
+  namespace (`unshare --mount`) to expose and `chcon` the real underlying
+  directory -- risky on a live system with `/sys` nested-mounted many times
+  over (cgroup, tracefs, configfs, ...). `vm-router-init.sh` instead sets
+  SELinux permissive on this disposable VM, which is a pragmatic call for a
+  PoC, not something to carry into production without actually fixing the
+  label.
+- **kcli quirks hit standing this up from scratch** (all worked around in
+  `vms/kcli-plan.yml`/`sim-switch-setup.sh`/`fix-vlan-membership.sh` --
+  see their own comments for the full detail):
+  - A brand-new bridge with no ports has no carrier, and kcli only
+    recognizes a bridge as a valid network name if libvirt's interface
+    driver considers it "active" -- which, on at least one dev host,
+    requires that existing carrier. `sim-switch-setup.sh` adds a tiny,
+    permanent keepalive veth pair for exactly this, so `sim-switch` is
+    valid from a genuinely from-scratch `kcli create plan`, not just on a
+    rerun against an already-populated bridge.
+  - kcli defaults to the older i440fx (`pc`) machine type, which gives
+    `ensN` predictable interface names inside the guest, not the `enpXsY`
+    names this whole example (and a plain `virt-install` VM) assumes.
+    `machine: q35` in the plan fixes this.
+  - kcli/libvirt's plain `bridge` NIC attachment has no concept of a
+    VLAN-filtering bridge's own VLAN membership: a freshly-attached tap
+    defaults to untagged VLAN 1, completely isolated from `sim-switch`'s
+    real trunk/access ports (`Destination Host Unreachable`, not just
+    packet loss, since there is no L2 path at all). `fix-vlan-membership.sh`
+    fixes this, run as an explicit step right after `kcli create plan`
+    rather than as a kcli `workflow` plan entry -- kcli's own VM creation
+    is threaded and workflow entries do not reliably wait for every VM
+    thread to have actually finished first.
+  - The on-prem VNF's underlay interface move (into the `perouter` netns)
+    happens asynchronously inside the controller container's own
+    reconciliation loop, not synchronously as part of `routerpod`'s own
+    `ExecStartPre` steps. `add-underlay-route.sh` waits for it (up to 2
+    minutes) before adding perouter's default route; a naive one-shot
+    attempt right after `deploy.sh` reliably fails with "Cannot find
+    device" on a genuine from-scratch deploy.
 - **MTU: VXLAN and IPsec overhead both need accounting for, and not the
   same way on each side.** OpenPERouter automatically sizes the L2VNI's
   veth pair as (underlay interface's own MTU) − 50 (VXLAN overhead) -- it
@@ -467,28 +640,28 @@ oc delete namespace openperouter-system
   discovery (already handled transparently by XFRM's ESP output path) to
   protect oversized packets, and it already does, correctly, with the
   interface at its normal, undiminished MTU.
-  - There is a second, unrelated gap: a pod's NAD-created interface (here,
-    `net1` via the bridge CNI plugin) is a completely separate veth pair
-    from OpenPERouter's own, entirely outside its reconcile loop, so it
-    keeps whatever MTU the NAD gives it (1500 by default) regardless of
+  - There is a second, unrelated gap: the NAD-created interface (here,
+    `net1` via the bridge CNI plugin -- whatever attaches to it, a pod or,
+    now, the `vlan-workload-vm` KubeVirt VM) is a completely separate veth
+    pair from OpenPERouter's own, entirely outside its reconcile loop, so
+    it keeps whatever MTU the NAD gives it (1500 by default) regardless of
     what the rest of the L2 segment uses. Since one L2 broadcast domain
-    needs one uniform MTU (a GCP pod and the on-prem VNF can each send
-    frames to the other, not just receive them), this needs its own
+    needs one uniform MTU (the GCP workload and the on-prem VNF can each
+    send frames to the other, not just receive them), this needs its own
     explicit `"mtu": 1380` in the NAD config (`gcp/l2vni.yaml`) -- without
-    it, a pod is a live PMTU black-hole risk, not merely a cosmetic mismatch.
-  - **How 1380 was measured**: `ping -M do -s N` (or, since some `ping`
-    builds -- e.g. BusyBox in the test images used here -- don't support
-    `-M do`, any plain oversized `ping`) from a real workload on one side to
-    the other, increasing `N` until replies stop / a `Frag needed ... mtu =
-    M` ICMP appears; a `ping -s N` payload corresponds to an IP-layer size
-    of `N+28` (20-byte IP + 8-byte ICMP header). 1380 (IP-layer) was the
-    largest size that worked reliably, symmetric in both directions, for
-    this specific tunnel (AES-GCM-256, ESP-in-UDP/NAT-T) over this
-    laptop's physical path -- both the target number and which side can
-    safely apply it statically are specific to this setup; re-measure
-    rather than assuming they carry over to a different cipher suite,
-    network path, or an architecture where the VPN does *not* share a
-    netns with the VXLAN underlay.
+    it, the workload is a live PMTU black-hole risk, not merely a cosmetic
+    mismatch.
+  - **How 1380 was measured**: `ping -M do -s N` from a real workload on
+    one side to the other, increasing `N` until replies stop / a
+    `Frag needed ... mtu = M` ICMP appears; a `ping -s N` payload
+    corresponds to an IP-layer size of `N+28` (20-byte IP + 8-byte ICMP
+    header). 1380 (IP-layer) was the largest size that worked reliably,
+    symmetric in both directions, for this specific tunnel (AES-GCM-256,
+    ESP-in-UDP/NAT-T) over this laptop's physical path -- both the target
+    number and which side can safely apply it statically are specific to
+    this setup; re-measure rather than assuming they carry over to a
+    different cipher suite, network path, or an architecture where the VPN
+    does *not* share a netns with the VXLAN underlay.
 - **`local_addrs = %defaultroute` silently fails under swanctl/vici.**
   `%defaultroute` is a legacy `ipsec.conf`/`starter` keyword; loaded via
   `swanctl --load-all` it is not recognized, and charon tries to literally
