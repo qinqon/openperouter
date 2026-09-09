@@ -1,0 +1,151 @@
+# kcli plan for the two on-prem libvirt VMs of the hybrid-vnf PoC:
+#   - vm-router:   the OpenPERouter VNF host (was: bare laptop netns/podman)
+#   - vm-workload: the on-prem test endpoint (was: the "ext-host" netns)
+#
+# kcli (https://kcli.readthedocs.io) wraps the virt-install/qemu-img/
+# genisoimage boilerplate and gives cloud-init a first-class YAML interface,
+# so this single file replaces what used to be a sequence of manual
+# `virt-install`/SSH steps. Everything after "VM boots" -- package installs,
+# the SELinux workaround, deploying the VNF quadlet stack -- happens via
+# cloud-init on first boot (see vm-router-init.sh); nothing needs to be run
+# by hand inside the guest.
+#
+# Prerequisites (host-level, NOT modeled by this plan -- see ../README or
+# the main README's "on-prem VM topology" section):
+#   1. libvirt/KVM installed, kcli installed (`sudo dnf -y copr enable
+#      karmab/kcli && sudo dnf -y install kcli`).
+#   2. `kcli download image fedora44` (or point vm_image at an
+#      already-downloaded qcow2 -- see the parameters below).
+#   3. ../sim-switch-setup.sh has been run at least once, so the
+#      "sim-switch" VLAN-aware bridge exists (this plan only attaches VM
+#      NICs to it; it does not create it -- kcli plans are ordered such
+#      that vms are created before any "workflow" entries would run, so a
+#      prerequisite the VMs themselves depend on can't live in this file).
+#   4. ../libvirt-host-setup.sh has been run (fixes Docker's iptables
+#      FORWARD policy silently blocking libvirt NAT traffic -- needed for
+#      vm-router's mgmt NIC to reach the internet at all, which cloud-init
+#      needs for the package installs and container image pulls below).
+#   5. A secrets parameter file with the real SHARED_SECRET/GCP_VPN_IP
+#      values -- copy secrets.yml.sample to secrets.yml (gitignored, never
+#      committed: matches the repo's *secret*.yml pattern) and fill it in.
+#
+# Usage (run as a user in the "libvirt"/"qemu" groups -- see kcli's own
+# "Libvirt additional configuration" docs; avoid sudo, which runs as root
+# and so looks for your ssh key/kcli config under /root instead of your
+# own home):
+#   kcli create plan -f kcli-plan.yml \
+#     -P uplink_nic=enp9s0u2u1u2 -P uplink_ip=192.168.1.170 \
+#     -P uplink_gw=192.168.1.1 --paramfile secrets.yml \
+#     hybrid-vnf-onprem
+#
+# Idempotent: rerunning updates in place rather than recreating from scratch
+# (kcli's own semantics). To tear down: `kcli delete plan hybrid-vnf-onprem`.
+parameters:
+  # Base image: a recognized short name kcli can download itself
+  # (`kcli download image fedora44`), or an absolute path to an
+  # already-downloaded qcow2 if you have one.
+  vm_image: fedora44
+  # The host's real uplink NIC. Naming it here (rather than a bridge or a
+  # kcli/libvirt network) makes kcli attach vm-router's second NIC via
+  # macvtap in bridge mode automatically -- see kvirt/providers/kvm's
+  # `elif netname in nics: iftype = 'direct'` -- giving it a genuine
+  # single-NAT-hop presence on the real LAN, the same property the
+  # bare-host README's "macvlan0" trick has, without needing that trick
+  # inside a VM (its NIC is never shared with a management interface).
+  uplink_nic: enp9s0u2u1u2
+  uplink_ip: 192.168.1.170
+  uplink_mask: 24
+  uplink_gw: 192.168.1.1
+  # Must already exist (see ../sim-switch-setup.sh) -- an existing,
+  # non-libvirt-managed Linux bridge, so kcli attaches to it directly
+  # (`elif netname in bridges: iftype = 'bridge'`) instead of creating a
+  # NAT/routed libvirt network.
+  vlan_bridge: sim-switch
+  # vm-workload's static IP on the stretched L2 segment (no gateway --
+  # pure east-west, matching the disconnected L2VNI design).
+  workload_ip: 192.168.100.200
+  workload_mask: 24
+  # Cloned onto vm-router so deploy.sh/vlan-setup.sh can run there (see
+  # vm-router-init.sh). HTTPS (not the git@ SSH remote) so no key material
+  # is needed inside the guest; override branch/url for a fork or to test
+  # local commits pushed to a scratch branch first.
+  vnf_repo_url: https://github.com/qinqon/openperouter.git
+  vnf_branch: vlan-evpn-gcp
+  # Your SSH public key, injected via cloud-init for guest access. Needed
+  # explicitly when running kcli via sudo (root's own ~/.ssh has no key of
+  # yours); harmless/redundant otherwise.
+  keys:
+    - ~/.ssh/id_ed25519.pub
+  # Secrets: DO NOT set real values here. Provide them via
+  # --paramfile secrets.yml (see secrets.yml.sample), which is gitignored.
+  SHARED_SECRET: ""
+  GCP_VPN_IP: ""
+
+vm-router:
+  image: "{{ vm_image }}"
+  numcpus: 2
+  memory: 2048
+  disks:
+    - size: 20
+  # kcli defaults to the older i440fx ("pc") machine type, which gives
+  # systemd predictable-naming interfaces like "ensN". Force q35 (PCI
+  # Express) to get "enpXsY" names instead, matching this file's (and
+  # openpe_config.yaml's/vlan-setup.sh's) explicit nic: names below --
+  # without this, those names never match any real interface and cloud-init
+  # silently fails to apply the static IP/VLAN config to it at all.
+  machine: q35
+  nets:
+    # Index order matters: it drives both PCI slot assignment (and so
+    # Fedora's predictable enpXsY naming) and which nic gets index==0's
+    # special gateway handling in kcli's own netplan generation. Explicit
+    # "nic" names avoid relying on kcli's own per-image name guessing,
+    # which does not know about Fedora's systemd-networkd-style naming.
+    - name: default
+      nic: enp1s0
+    - name: "{{ uplink_nic }}"
+      nic: enp2s0
+      ip: "{{ uplink_ip }}"
+      mask: "{{ uplink_mask }}"
+      gateway: "{{ uplink_gw }}"
+    - name: "{{ vlan_bridge }}"
+      nic: enp3s0
+      # No IP at the OS level: vlan-setup.sh (run via vm-router-init.sh)
+      # creates the real enp3s0.100 VLAN subinterface + br-vlan bridge on
+      # top of this raw trunk NIC; noconf just brings it up cleanly
+      # without cloud-init racing DHCP against that later setup.
+      #
+      # Requires sim-switch to have a carrier-bearing port already (see
+      # ../sim-switch-setup.sh's "sskeep0" keepalive veth) -- libvirt's
+      # interface driver only recognizes a bridge as a valid kcli network
+      # name once it considers it "active", which a from-scratch bridge
+      # with no ports plugged in yet is not (observed as "Invalid network
+      # sim-switch"). Do NOT use `ovs: true` as a workaround here even
+      # though it happens to bypass that same check: it also adds a real
+      # `<virtualport type='openvswitch'/>` element to the interface XML,
+      # which makes libvirt try to add the VM's tap as an actual OVS port
+      # via ovs-vsctl -- failing outright against a plain Linux bridge
+      # ("Unable to add port vnetN to OVS bridge sim-switch").
+      noconf: true
+  scripts:
+    - vm-router-init.sh
+
+vm-workload:
+  image: "{{ vm_image }}"
+  numcpus: 1
+  memory: 1024
+  disks:
+    - size: 10
+  # See vm-router's "machine: q35" comment: same reason, needed for its
+  # nic: enp2s0 to be a real interface name.
+  machine: q35
+  nets:
+    - name: default
+      nic: enp1s0
+    - name: "{{ vlan_bridge }}"
+      nic: enp2s0
+      ip: "{{ workload_ip }}"
+      mask: "{{ workload_mask }}"
+      # No gateway: pure L2, matching the disconnected L2VNI. See the
+      # matching comment on vm-router's vlan_bridge nic for why this
+      # bridge needs sim-switch-setup.sh's keepalive port and must NOT use
+      # `ovs: true`.

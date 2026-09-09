@@ -61,6 +61,23 @@ if ! ip link show "${SWITCH_BRIDGE}" &>/dev/null; then
 fi
 ip link set "${SWITCH_BRIDGE}" up
 
+# A brand-new bridge with no ports has admin state UP but link state DOWN
+# (NO-CARRIER). libvirt's interface driver (virConnectListInterfaces, which
+# backs both `virsh iface-list` with no --all and kcli's own "is this a
+# valid network" check) only reports bridges it considers active, which
+# empirically requires an existing carrier-bearing port -- observed as
+# "Invalid network sim-switch" from a from-scratch `kcli create plan`
+# (see vms/kcli-plan.yml) even though the bridge plainly exists. A tiny,
+# permanent, never-torn-down veth pair with one end plugged in gives it
+# that carrier so both `virsh iface-list` and kcli see it immediately,
+# before any real VM tap is ever attached.
+if ! ip link show sskeep0 &>/dev/null; then
+    ip link add sskeep0 type veth peer name sskeep1
+fi
+ip link set sskeep0 master "${SWITCH_BRIDGE}"
+ip link set sskeep0 up
+ip link set sskeep1 up
+
 # Trunk link: TRUNK_VETH is meant to become vlan-setup.sh's VLAN_NIC.
 if ! ip link show "${TRUNK_VETH}" &>/dev/null; then
     ip link add "${TRUNK_VETH}" type veth peer name "${TRUNK_PORT}"
