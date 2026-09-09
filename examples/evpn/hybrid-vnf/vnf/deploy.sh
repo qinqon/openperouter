@@ -8,7 +8,10 @@
 #   2. seeds the static config (node-config.yaml + configs/openpe_*.yaml) and
 #      the FRR config into the well-known host paths,
 #   3. renders the VPN env from network.env,
-#   4. installs the quadlets and starts the systemd services.
+#   4. renders the underlay env (UNDERLAY_IFACE/UNDERLAY_GW, both optional --
+#      see network.env) so the routerpod quadlet can add perouter's default
+#      route automatically instead of that being a manual post-step,
+#   5. installs the quadlets and starts the systemd services.
 #
 # Prerequisites: podman, systemd, a spare underlay NIC (set in
 # config/configs/openpe_config.yaml) and the workload VLAN bridge from
@@ -89,6 +92,12 @@ GCP_RR_CIDR=${GCP_RR_CIDR:-10.0.1.0/24}
 EOF
 chmod 0600 /etc/openpe-vnf/vpn.env
 install -m 0755 "${SCRIPT_DIR}/start-vpn.sh" /etc/openpe-vnf/start-vpn.sh
+
+log "rendering underlay env into /etc/openpe-vnf/underlay.env"
+cat > /etc/openpe-vnf/underlay.env <<EOF
+UNDERLAY_IFACE=${UNDERLAY_IFACE:-}
+UNDERLAY_GW=${UNDERLAY_GW:-}
+EOF
 
 log "installing quadlets into ${QUADLET_DIR}"
 mkdir -p "${QUADLET_DIR}"

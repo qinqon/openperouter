@@ -33,6 +33,15 @@ TimeoutStopSec=70
 ExecStartPre=-/usr/sbin/ip netns add perouter
 ExecStartPre=/usr/sbin/ip netns exec perouter ip link set lo up
 
+# Add perouter's default route once the underlay NetworkDevice interface has
+# been moved in by the controller (it preserves addresses but not routes --
+# see config/configs/openpe_config.yaml). Optional: no-ops when
+# /etc/openpe-vnf/underlay.env is missing or its vars are empty, in which
+# case add the route by hand as documented there. "-" ignores failures (e.g.
+# a transient race with the controller's own interface move on first start);
+# "route replace" makes re-running idempotent instead of erroring on restart.
+ExecStartPost=-/bin/sh -c '. /etc/openpe-vnf/underlay.env 2>/dev/null; [ -n "$UNDERLAY_IFACE" ] && [ -n "$UNDERLAY_GW" ] && ip netns exec perouter ip route replace default via "$UNDERLAY_GW" dev "$UNDERLAY_IFACE"'
+
 [Install]
 # Automatically enable this pod at boot
 # The systemd-generator will create the necessary symlinks
