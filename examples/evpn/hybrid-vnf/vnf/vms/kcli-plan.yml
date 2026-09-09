@@ -1,10 +1,10 @@
 # kcli plan for the two on-prem libvirt VMs of the hybrid-vnf PoC:
-#   - vm-router:   the OpenPERouter VNF host (was: bare laptop netns/podman)
-#   - vm-workload: the on-prem test endpoint (was: the "ext-host" netns)
+#   - vm-router:   the OpenPERouter VNF host
+#   - vm-workload: the on-prem test endpoint
 #
 # kcli (https://kcli.readthedocs.io) wraps the virt-install/qemu-img/
 # genisoimage boilerplate and gives cloud-init a first-class YAML interface,
-# so this single file replaces what used to be a sequence of manual
+# so this single file is all that is needed instead of a sequence of manual
 # `virt-install`/SSH steps. Everything after "VM boots" -- package installs,
 # the SELinux workaround, deploying the VNF quadlet stack -- happens via
 # cloud-init on first boot (see vm-router-init.sh); nothing needs to be run

@@ -10,44 +10,40 @@ on-prem side is not a Kubernetes cluster but one container-based router that
 also terminates the VPN, so you can exercise the cloud-VPN overhead and the
 VLAN attachment without a second cluster.
 
-Both ends run in a **VM**, not a container or a plain netns: the on-prem VNF
-in a dedicated libvirt VM (`vm-router`), the on-prem workload in a second one
-(`vm-workload`), and the GCP-side workload as a **KubeVirt** `VirtualMachine`
-(not a plain pod) -- closer to the actual scenario this example is meant to
-de-risk (migrating a VM's network attachment, not a container's). The two
-on-prem VMs are provisioned and fully configured with **no manual SSH steps**
-via [kcli](https://kcli.readthedocs.io) + cloud-init -- see "On-prem VM
-provisioning" below.
+Both ends run in a **VM**: the on-prem VNF in a dedicated libvirt VM
+(`vm-router`), the on-prem workload in a second one (`vm-workload`), and the
+GCP-side workload as a **KubeVirt** `VirtualMachine` -- matching the actual
+scenario this example is meant to de-risk, migrating a VM's network
+attachment. The two on-prem VMs are provisioned and fully configured with
+**no manual SSH steps** via [kcli](https://kcli.readthedocs.io) + cloud-init
+-- see "On-prem VM provisioning" below.
 
 **Status: verified working end-to-end, laptop to GCP**, for everything this
-example is responsible for, including genuine 802.1Q VLAN tag handling:
-IPsec tunnel established; all 3 on-prem-to-RR eBGP sessions up
-(`ipv4-unicast` + `l2vpn evpn`); EVPN Type-3 (VTEP) routes for all 3 GCP
-worker VTEPs visible on-prem via route reflection across the eBGP
-boundary; the on-prem VXLAN device came up with all 3 worker VTEPs as
-head-end-replication flood targets; genuine EVPN Type-2 (MAC) routes
-exchanged in both directions (not just VXLAN flood-and-learn); MTU
-correctly accounted for on both sides (see the MTU gotcha); and
-bidirectional 300KB TCP transfers between the on-prem `vm-workload` VM and
-the GCP KubeVirt VM completed with 0 bytes lost (MD5-verified) at
-realistic, everyday-file-size scale, not just small pings.
+example is responsible for, including genuine **workload-to-workload**
+connectivity between the two VM endpoints (`vm-workload` on-prem, the
+KubeVirt VM on GCP) and genuine 802.1Q VLAN tag handling: IPsec tunnel
+established; all 3 on-prem-to-RR eBGP sessions up (`ipv4-unicast` +
+`l2vpn evpn`); EVPN Type-3 (VTEP) routes for all 3 GCP worker VTEPs
+visible on-prem via route reflection across the eBGP boundary; the
+on-prem VXLAN device came up with all 3 worker VTEPs as
+head-end-replication flood targets; genuine EVPN Type-2 (MAC) routes for
+each workload VM's real MAC exchanged in both directions (not just VXLAN
+flood-and-learn); MTU correctly accounted for on both sides (see the MTU
+gotcha); and bidirectional 300KB TCP transfers directly between the two
+workload VMs completed with 0 bytes lost (MD5-verified) at realistic,
+everyday-file-size scale, not just small pings.
 
-An earlier version of this test used a plain veth attached directly to
-`br-vlan`, bypassing 802.1Q tag processing entirely -- real, but only of
-OpenPERouter's own bridging/EVPN/VXLAN path, not of the VLAN-tagging
-mechanics this example's own instructions assume. That gap is now closed:
 `sim-switch-setup.sh` builds a genuine VLAN-aware Linux bridge as a
 simulated switch (a real trunk port carrying tagged frames to the VNF, a
 real access port carrying plain untagged frames to the on-prem workload),
 so the same kernel 802.1Q code a physical switch and NIC would use is
 genuinely exercised -- confirmed directly with `tcpdump`: identical ICMP
 exchanges show `vlan 100` tags on the trunk port and no tag at all on the
-access port. Both switch ports now carry a **real VM's** traffic (libvirt
-taps into `vm-router`/`vm-workload`, not a software-only veth pair used
-only for the initial tagging proof) -- see "Test the stretch" below for
+access port. Both switch ports carry a **real VM's** traffic (libvirt
+taps into `vm-router`/`vm-workload`) -- see "Test the stretch" below for
 the full setup and results. What remains unverified is only physical
 hardware itself (a real NIC/driver and a real switch), which is a much
-smaller, lower-risk gap than the VLAN-tagging mechanics were.
+smaller, lower-risk gap than the VLAN-tagging mechanics are.
 
 ```
 --- DIAGRAM 1: on-prem -- two libvirt VMs + a simulated VLAN switch ---
@@ -428,9 +424,8 @@ real end-user device connects, since almost no real host runs 8021q
 itself. This is not a stand-in for tagging: the switch bridge's VLAN
 filtering is the same kernel code a real switch ASIC/software switch uses,
 `vlan-setup.sh`'s `.100` subinterface on the trunk side does genuine tag
-stripping/insertion, and (unlike an earlier version of this test) both
-switch ports now carry a **real VM's** traffic via real libvirt taps, not
-a software-only veth pair.
+stripping/insertion, and both switch ports carry a **real VM's** traffic
+via real libvirt taps.
 
 ```bash
 VM_ROUTER_IP=$(sudo virsh domifaddr vm-router | awk '/ipv4/{print $4}' | cut -d/ -f1)
@@ -441,8 +436,8 @@ ssh fedora@"${VM_WORKLOAD_IP}" ping -c 5 192.168.100.10
 **Verify the tagging itself is real**, not assumed, by capturing the same
 ping on both switch ports at once (find the current tap names with
 `sudo virsh domiflist vm-router`/`vm-workload` -- they change across VM
-recreations, unlike `sim-switch-setup.sh`'s own fixed `sw-trunk-port`/
-`sw-access-port` names from its now-superseded veth-based test mode):
+recreations, so look them up fresh each time rather than assuming fixed
+names):
 ```bash
 sudo tcpdump -nnei <vm-router's sim-switch tap> icmp &    # expect: vlan 100 tag visible
 sudo tcpdump -nnei <vm-workload's sim-switch tap> icmp &  # expect: plain Ethernet, no tag
@@ -453,13 +448,13 @@ Confirmed: the identical ICMP exchange (same id/seq, same MACs) shows
 `ethertype IPv4` with no tag at all on the access-side tap -- the switch is
 genuinely adding/removing the tag, not passing it through untouched.
 
-**Verified working, bidirectionally**, through this real VLAN path, real
-VMs on both ends (on-prem laptop to `ellorent-vlan-evpn-k25qm`):
+**Verified working, bidirectionally**, workload VM to workload VM through
+this real VLAN path (on-prem laptop to `ellorent-vlan-evpn-k25qm`):
 - Ping: 0% loss, ~100ms RTT (matching the VPN's own latency).
 - MTU boundary holds exactly as measured (see the MTU gotcha): 1380 bytes
   (IP-layer) 0% loss, 1381 bytes cleanly rejected (`ping -M do -s 1352`/
-  `-s 1353` from `vm-workload`) -- re-confirmed through the real tagged,
-  real-VM path, not just the earlier bridge-only or pod-based tests.
+  `-s 1353` from `vm-workload`) -- confirmed through the real tagged,
+  real-VM path.
 - `show evpn vni 110` on-prem: VXLAN device up, all 3 GCP worker VTEPs as
   head-end-replication flood targets.
 - `show evpn mac vni 110` on-prem, after the ping: `vm-workload`'s **real**
