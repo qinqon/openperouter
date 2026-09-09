@@ -37,6 +37,7 @@
 #     -P uplink_nic=enp9s0u2u1u2 -P uplink_ip=192.168.1.170 \
 #     -P uplink_gw=192.168.1.1 --paramfile secrets.yml \
 #     hybrid-vnf-onprem
+#   ./fix-vlan-membership.sh   # required, see that file's header comment
 #
 # Idempotent: rerunning updates in place rather than recreating from scratch
 # (kcli's own semantics). To tear down: `kcli delete plan hybrid-vnf-onprem`.
@@ -149,3 +150,13 @@ vm-workload:
       # matching comment on vm-router's vlan_bridge nic for why this
       # bridge needs sim-switch-setup.sh's keepalive port and must NOT use
       # `ovs: true`.
+
+# fix-vlan-membership.sh is NOT wired in as a kcli "workflow" type entry
+# here, despite kcli supporting exactly that (a locally-run, post-vm-
+# creation step) -- tried it first, but kcli's own vm creation is
+# threaded and "workflow" entries do not reliably wait for every vm
+# thread to have actually finished first (observed: "failed to get
+# domain 'vm-router'" from a workflow racing a still-in-progress vm
+# creation, non-deterministically, even with a 60s poll loop inside the
+# script itself). Run it as a separate, explicit step instead -- see its
+# own header comment for what it does and why it is needed at all.
