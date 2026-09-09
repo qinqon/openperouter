@@ -32,7 +32,7 @@
 #   sudo UPLINK_NIC=enp9s0u2u1u2 ./libvirt-host-setup.sh
 set -euo pipefail
 
-UPLINK_NIC="${UPLINK_NIC:?set UPLINK_NIC to the host's real uplink NIC (the one virbr0-sourced traffic egresses through)}"
+UPLINK_NIC="${UPLINK_NIC:?set UPLINK_NIC to the hosts real uplink NIC (the one virbr0-sourced traffic egresses through)}"
 LIBVIRT_BRIDGE="${LIBVIRT_BRIDGE:-virbr0}"
 
 if [[ "$(id -u)" -ne 0 ]]; then echo "must run as root" >&2; exit 1; fi
